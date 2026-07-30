@@ -105,6 +105,30 @@ Read the handwriting VERY carefully. "Grill" and "Quilt" look similar in cursive
 - Do NOT split quantities into multiple output lines.
 - The seller writes separate rows (each with its own item number) when they want items sold separately. Trust the sheet.
 
+=== MULTI-LINE DESCRIPTIONS (VERY IMPORTANT) ===
+Sellers often write long descriptions that WRAP onto a second or third line on the sheet. When a line on the sheet does NOT start with a new item number, it is a CONTINUATION of the previous item's description — NOT a separate item.
+
+Rules for continuation lines:
+- Read the item number ONCE at the start. Every following line without its own item number belongs to that same item.
+- MERGE all continuation lines into ONE output line for that item, joined by a single space.
+- Only start a new output line when you see the NEXT item number written on the sheet.
+
+Examples:
+  Sheet has:                                    Output:
+  ---------                                     -------
+  G6182  2 mattresses and                       G6182 2 MATTRESSES AND LARGE GRILL COVER WITH ZIPPER
+         large grill cover with zipper
+
+  G691   Outdoor Roller Shade Coolaroo          G691 OUTDOOR ROLLER SHADE COOLAROO NEW IN BOX 72 X 72 IN MOCHA COLOR
+         NIB 72x72 in
+         Mocha color
+
+  G629   Magnetic strips 54 pieces              G629 MAGNETIC STRIPS 54 PIECES APPROX 1 2 X 10 3 4 FOR CRAFTS
+         approx 1/2 x 10 3/4
+         for crafts
+
+DO NOT output continuation text on its own line. DO NOT drop continuation text. Everything the seller wrote about that item goes on the SAME output line as the item number.
+
 === ORDER (CRITICAL) ===
 - Output the lines in the EXACT order they appear on the page, top to bottom.
 - Do NOT sort by item number. Do NOT rearrange. Do NOT alphabetize.
@@ -284,21 +308,39 @@ def sanitize_transcript(text: str) -> str:
         cleaned = sanitize_line(line)
         if not cleaned:
             continue
-        # HARD FILTER: only keep lines that look like an item row
-        # (item number at the start, followed by a space).
-        if not ITEM_NUMBER_RE.match(cleaned):
-            continue
-        # Strip lot codes (18A, Z, F, glued codes) right after the item number
-        cleaned = strip_lot_code(cleaned)
-        # Dedupe repeated leading item-number tokens ("6182 6182 ..." -> "6182 ...")
-        tokens = cleaned.split(" ")
-        if len(tokens) >= 3 and tokens[0] == tokens[1]:
-            cleaned = " ".join([tokens[0]] + tokens[2:])
+        # If this line starts with an item number, it's a new item row.
+        # Strip lot codes and dedupe, then append.
+        if ITEM_NUMBER_RE.match(cleaned):
+            cleaned = strip_lot_code(cleaned)
             tokens = cleaned.split(" ")
-        # Guarantee every item has SOMETHING after the number
-        if len(tokens) < 2 or not " ".join(tokens[1:]).strip():
-            cleaned = f"{tokens[0]} ILLEGIBLE"
-        out_lines.append(cleaned)
+            # Dedupe repeated leading item-number tokens ("6182 6182 ...")
+            if len(tokens) >= 3 and tokens[0] == tokens[1]:
+                cleaned = " ".join([tokens[0]] + tokens[2:])
+                tokens = cleaned.split(" ")
+            # Guarantee every item has SOMETHING after the number
+            if len(tokens) < 2 or not " ".join(tokens[1:]).strip():
+                cleaned = f"{tokens[0]} ILLEGIBLE"
+            out_lines.append(cleaned)
+            continue
+
+        # Otherwise this line does NOT start with an item number.
+        # It's most likely a continuation of the previous item's description
+        # (the seller wrapped the text onto a second line on the sheet).
+        # Merge it onto the last real item line instead of dropping it.
+        # Look backwards for the last real item line (skip section markers).
+        merge_idx = None
+        for i in range(len(out_lines) - 1, -1, -1):
+            prev = out_lines[i]
+            if prev.startswith("---") and prev.endswith("---"):
+                continue  # skip page markers
+            if ITEM_NUMBER_RE.match(prev):
+                merge_idx = i
+                break
+        if merge_idx is not None:
+            # Append the continuation text with a single space.
+            out_lines[merge_idx] = f"{out_lines[merge_idx]} {cleaned}"
+        # If there's no previous item to attach to (rare — page starts with
+        # continuation text), just drop the orphan line silently.
     return "\n".join(out_lines).strip()
 
 
