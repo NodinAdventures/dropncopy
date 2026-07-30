@@ -347,6 +347,18 @@ body {
   grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
 }
 
+/* On desktop/tablet, stretch each entry across the full panel width
+   so the transcription area is long instead of a small square.
+   Mobile (<=640px) is unchanged. */
+@media (min-width: 900px) {
+  .entries-grid {
+    grid-template-columns: 1fr;
+  }
+  .entry-text {
+    min-height: 340px;
+  }
+}
+
 /* Entry card */
 .entry-card {
   background: var(--surface);
