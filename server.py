@@ -1,4 +1,3 @@
-"""
 File Retype backend
 - Skips blank pages via pixel-darkness check before hitting the AI
 - Runs page transcriptions in parallel
@@ -14,7 +13,7 @@ from typing import List, Tuple
 
 import os
 
-from anthropic import AsyncAnthropic
+from openai import AsyncOpenAI
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -45,7 +44,28 @@ async def appjs():
 async def stylecss():
     return FileResponse(os.path.join(HERE, "style.css"), media_type="text/css")
 
-client = AsyncAnthropic()
+# Read the OpenAI API key explicitly from the environment. The SDK normally
+# picks up OPENAI_API_KEY on its own, but some hosts (including certain
+# Render configurations) don't expose the process env cleanly, so we read
+# it here and pass it in ourselves. We also strip whitespace / quotes in case
+# the value was pasted with any extras.
+_OPENAI_KEY = (os.environ.get("OPENAI_API_KEY") or "").strip().strip('"').strip("'")
+client = AsyncOpenAI(api_key=_OPENAI_KEY) if _OPENAI_KEY else AsyncOpenAI()
+
+@app.get("/api/debug-env")
+async def debug_env():
+    """Safe diagnostic: reports whether OPENAI_API_KEY is set and its shape.
+    Never returns the actual key.
+    """
+    key = os.environ.get("OPENAI_API_KEY") or ""
+    return {
+        "openai_api_key_present": bool(key),
+        "openai_api_key_length": len(key),
+        "openai_api_key_starts_with": key[:7] if key else "",
+        "openai_api_key_ends_with": key[-4:] if len(key) >= 4 else "",
+        "openai_api_key_has_whitespace_edges": key != key.strip(),
+        "openai_api_key_has_quotes": key.startswith('"') or key.startswith("'") or key.endswith('"') or key.endswith("'"),
+    }
 
 SYSTEM_PROMPT = """You are an OCR transcription assistant for handwritten charity-auction / consignment intake sheets. The output goes into a single DESCRIPTION field on the JnJ Online Auction listing form.
 
@@ -148,33 +168,28 @@ MAX_CONCURRENT = 8
 
 async def transcribe_image(image_bytes: bytes, media_type: str) -> str:
     b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
-    resp = await client.messages.create(
-        model="claude_sonnet_4_6",
+    data_url = f"data:{media_type};base64,{b64}"
+    resp = await client.chat.completions.create(
+        model="gpt-4o",
         max_tokens=8000,
-        system=SYSTEM_PROMPT,
         messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
             {
                 "role": "user",
                 "content": [
                     {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": media_type,
-                            "data": b64,
-                        },
+                        "type": "image_url",
+                        "image_url": {"url": data_url, "detail": "high"},
                     },
                     {
                         "type": "text",
                         "text": "Transcribe all text on this page. Output only the transcription.",
                     },
                 ],
-            }
+            },
         ],
     )
-    raw = "".join(
-        block.text for block in resp.content if getattr(block, "type", None) == "text"
-    ).strip()
+    raw = (resp.choices[0].message.content or "").strip()
     return sanitize_transcript(raw)
 
 
