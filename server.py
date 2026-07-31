@@ -87,15 +87,29 @@ There is NO character limit on the line. Include EVERY note the seller wrote for
 Read the item number on the sheet exactly as it is written. Include any letter prefix or suffix that is actually part of the number (like G6182, F1234, 10686FV).
 If the number is 6182, output 6182. If the number is G6182, output G6182. Do not add or remove letters.
 
-=== STRIPPING LOT CODES (VERY IMPORTANT) ===
-After the item number, sheets often have an INTERNAL LOT CODE like "18A", "17B", "21C", "F", "Z", "P", or a single letter+digit like "Z 1", "P 3". This is the seller's shelf/box location and MUST NOT appear anywhere in the output. STRIP IT COMPLETELY.
+=== LOT NUMBERS (VERY IMPORTANT — KEEP THEM) ===
+After the item number, sheets have a LOT NUMBER in a separate column labeled "OFFICE USE ONLY" or similar. This looks like "18A", "17B", "21C", "F", "Z", "P", or a letter+digit like "Z 1", "P 3".
 
-Examples of stripping:
-  - Sheet row: "G6182 18A  2 - Matts + Lg grill cover"  →  "G6182 2 MATTRESSES AND LARGE GRILL COVER"
-  - Sheet row: "G691 Z 3  Outdoor Roller Shade by Coolaroo NIB 72x72 Mocha"  →  "G691 OUTDOOR ROLLER SHADE BY COOLAROO NEW IN BOX 72 X 72 MOCHA"
-  - Sheet row: "G689 Z 1  6 Step Metal Handrail NIB"  →  "G689 6 STEP METAL HANDRAIL NEW IN BOX"
+THESE ARE REQUIRED and must appear in the output IMMEDIATELY AFTER the item number, separated by a single space, and BEFORE the description.
 
-Anything between the item number and the description is the lot code — DELETE IT.
+Format: ITEM_NUMBER LOT_CODE DESCRIPTION
+
+Examples:
+  - Sheet row: "G6182  18A  2 - Matts + Lg grill cover"  →  "G6182 18A 2 MATTRESSES AND LARGE GRILL COVER"
+  - Sheet row: "G6183  18A  3 unused faucet covers"      →  "G6183 18A 3 UNUSED FAUCET COVERS"
+  - Sheet row: "G6184  F    apox 3' tall"                →  "G6184 F APPROXIMATELY 3 TALL"
+  - Sheet row: "G6185  17B  Comforter"                   →  "G6185 17B COMFORTER"
+  - Sheet row: "G6186  18C  2 aprons"                    →  "G6186 18C 2 APRONS"
+  - Sheet row: "G6187  21C  Pink + Black"                →  "G6187 21C PINK AND BLACK"
+  - Sheet row: "G6188  18A  Java Seat"                   →  "G6188 18A JAVA SEAT"
+
+If you see two chunks between the item number and the description (like "Z 3" or "P 16"), merge them WITHOUT a space — they form ONE lot code:
+  - Sheet row: "G691  Z 3  Outdoor Roller Shade"         →  "G691 Z3 OUTDOOR ROLLER SHADE"
+  - Sheet row: "G205  P 16  Hunter Golf Cart"            →  "G205 P16 HUNTER GOLF CART"
+
+The lot number is always in the second column of the sheet, right after the item number column, and BEFORE the description column. Read them from the columns exactly as laid out.
+
+If a row has NO lot number written (the office-use column is empty for that row), just output the item number and description with no lot code in between.
 
 Read the handwriting VERY carefully. "Grill" and "Quilt" look similar in cursive — use context: "grill cover" makes more sense than "quilt cover" when paired with a mattress. Similarly "Faucet" makes more sense than "Facent".
 
@@ -251,13 +265,17 @@ LOT_CODE_STRICT_RE = re.compile(r'^(\d{1,2}[A-Z]|[A-Z])$')
 # real English words follow, that chunk is the lot code.
 def strip_lot_code(line: str) -> str:
     """
-    Remove the shelf/lot code that sits between the item number and the description.
+    PRESERVE the lot code between the item number and the description.
+    JnJ needs the lot number kept as: ITEM_NUMBER LOT_CODE DESCRIPTION
+
+    This function normalizes multi-token lot codes (like "Z 3" or "P 16") into
+    a single joined token ("Z3", "P16") so the output has a clean 2-token prefix.
+
     Examples:
-      G6182 18A 2 MATTRESSES...  ->  G6182 2 MATTRESSES...
-      G691 Z 3 COOLAROO...       ->  G691 3 COOLAROO...  (Z is shelf, 3 stays)
-      G198 1969 KITCHENAID...    ->  G198 KITCHENAID...
-      G205 P16 HUNTER GOLF...    ->  G205 HUNTER GOLF...
-      G6182 2 MATTRESSES         ->  unchanged (2 is a quantity, not a lot code)
+      G6182 18A 2 MATTRESSES...  ->  unchanged (already clean)
+      G691 Z 3 COOLAROO...       ->  G691 Z3 COOLAROO...
+      G205 P 16 HUNTER GOLF...   ->  G205 P16 HUNTER GOLF...
+      G6182 2 MATTRESSES         ->  unchanged (no lot code present)
     """
     parts = line.split(" ")
     if len(parts) < 2:
@@ -265,34 +283,43 @@ def strip_lot_code(line: str) -> str:
     m = ITEM_NUMBER_RE.match(parts[0])
     if not m:
         return line
+
+    # Look at token 1 (right after item number). If it looks like a lot code,
+    # keep it. If token 1 is a single letter (Z, F, P) and token 2 is short
+    # digits (like "3", "16"), MERGE them into one lot code ("Z3", "P16").
     kept = [parts[0]]
     i = 1
-    stripped = 0
-    while i < len(parts) and stripped < 2:
+    if i < len(parts):
         tok = parts[i]
-        # 1) Strict lot codes: single letter (F, Z, P, C) or digits+letter (18A, 17B, 21C)
-        if LOT_CODE_STRICT_RE.match(tok):
+        # Case A: single letter lot code (F, Z, P, C, etc.) possibly followed
+        # by a small number that belongs with it.
+        if re.fullmatch(r'[A-Z]', tok) and i + 1 < len(parts) and re.fullmatch(r'\d{1,3}', parts[i + 1]):
+            # But only merge if the number is a small "sub-position" (1-3 digits)
+            # AND there's real description text after. Check that parts[i+2] exists
+            # and looks like a word (not another digit that would indicate quantity).
+            if i + 2 < len(parts):
+                after = parts[i + 2]
+                # If the token after the digit is a word (has letters), merge Z + 3 -> Z3
+                if any(c.isalpha() for c in after):
+                    kept.append(tok + parts[i + 1])
+                    i += 2
+                else:
+                    # Just a lone letter followed by numbers (rare) — keep letter only
+                    kept.append(tok)
+                    i += 1
+            else:
+                kept.append(tok)
+                i += 1
+        # Case B: standard lot code (18A, 17B, 21C, F, Z alone) — keep as-is
+        elif LOT_CODE_STRICT_RE.match(tok):
+            kept.append(tok)
             i += 1
-            stripped += 1
-            continue
-        # 2) All-digit shelf codes 2-4 chars, ONLY if the very next token starts
-        #    a real English word (letters-only, 3+ chars). Otherwise the digits
-        #    are probably a quantity, dimension, or model number.
-        if re.fullmatch(r'\d{2,4}', tok) and i + 1 < len(parts):
-            next_tok = parts[i + 1]
-            if re.fullmatch(r'[A-Z]{3,}', next_tok):
-                i += 1
-                stripped += 1
-                continue
-        # 3) Letter+digits like P16, A22, etc. (max 4 chars total) followed by a word
-        if re.fullmatch(r'[A-Z]\d{1,3}', tok) and i + 1 < len(parts):
-            next_tok = parts[i + 1]
-            if re.fullmatch(r'[A-Z]{3,}', next_tok):
-                i += 1
-                stripped += 1
-                continue
-        break
-    kept.extend(parts[i:])
+        # Case C: not a lot code (probably a quantity or start of description) —
+        # just leave everything alone.
+    # Append the rest of the description untouched
+    while i < len(parts):
+        kept.append(parts[i])
+        i += 1
     return " ".join(kept)
 
 
