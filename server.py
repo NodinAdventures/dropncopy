@@ -7,18 +7,22 @@ File Retype backend
 
 import asyncio
 import base64
+import csv
 import io
 import json
 import re
-from typing import List, Tuple
+import uuid
+import zipfile
+from typing import List, Tuple, Dict, Any, Optional
 
 import os
 
 from openai import AsyncOpenAI
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form
+from fastapi.responses import StreamingResponse, FileResponse, Response, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from PIL import Image
 
 app = FastAPI()
 
@@ -538,6 +542,542 @@ async def extract_stream(file: UploadFile = File(...)):
     return StreamingResponse(stream(), media_type="application/x-ndjson")
 
 
+# --------------------- JnJ CSV export ---------------------
+
+# Exact column order for JnJ's bulk-import CSV, from the sample they provided.
+JNJ_CSV_COLUMNS = [
+    "Seller", "Category", "ListingFormat", "Title", "Description",
+    "ItemLocation", "ZipCode", "Quantity", "PreferredCurrency", "Price",
+    "StartBid", "Reserve", "BuyItNowPrice", "PaymentProcess", "PaymentInstr",
+    "PayPalEmail", "BuyersPremiumPct", "IsTaxable", "TaxPercent",
+    "StartDate", "EndDate", "Duration", "ReList",
+    "HomePageFeatured", "CategoryFeatured", "HighlightListing",
+    "BoldListing", "GalleryListing", "HitCounterStyle",
+    "image_1", "image_2", "image_3", "image_4", "image_5",
+    "image_6", "image_7", "image_8", "image_9", "image_10",
+    "image_11", "image_12", "image_13", "image_14", "image_15",
+    "image_16", "image_17", "image_18", "image_19", "image_20",
+    "cf_SellerID",
+]
+
+# Default field values matching JnJ's sample CSV.
+JNJ_DEFAULTS = {
+    "Seller": "FREMONT",
+    "ListingFormat": "AUCTION",
+    "ItemLocation": "|UNITED STATES|MICHIGAN|",
+    "ZipCode": "49412",
+    "Price": "$1.00 ",
+    "BuyersPremiumPct": "10",
+    "TaxPercent": "6",
+}
+
+
+def parse_item_lines(transcript: str) -> List[Tuple[str, str, str]]:
+    """
+    Parse cleaned transcript into (item_number, lot_code, description) tuples.
+    Skips page markers and empty lines.
+
+    Input line examples:
+      "G6182 18A 2 MATTRESSES AND LARGE GRILL COVER"
+      "7942 2046 ROCKER"
+      "6199 ILLEGIBLE CROSSEDOUT"       (no lot code)
+      "G100 KITCHENAID MIXER"          (no lot code)
+
+    Returns list of (item_num, lot_code_or_empty, description).
+    """
+    items = []
+    for raw in transcript.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("---") and line.endswith("---"):
+            continue
+        if not ITEM_NUMBER_RE.match(line):
+            continue
+        parts = line.split(" ")
+        if len(parts) < 2:
+            continue
+        item_num = parts[0]
+        # Check if parts[1] is a lot code (1-2 digits + letter, or single letter,
+        # or letter+digits like Z3, P16).
+        rest = parts[1:]
+        lot_code = ""
+        if rest:
+            tok = rest[0]
+            # A lot code is short (2-5 chars) and MUST contain at least one letter.
+            # This matches JnJ's real format: 18A, 17B, 21C, 204B, 20LA, 73C, F, K,
+            # Z, O, Z3, P16, 15C, 9B. Pure-digit tokens like "2046" are NOT lot codes
+            # (they're either quantities or a seller's internal code that stays in
+            # the description).
+            if 1 <= len(tok) <= 5 and any(c.isalpha() for c in tok) and re.fullmatch(r'[A-Z0-9]+', tok):
+                lot_code = tok
+                rest = rest[1:]
+        description = " ".join(rest).strip()
+        if not description:
+            description = "ILLEGIBLE"
+        items.append((item_num, lot_code, description))
+    return items
+
+
+def build_jnj_csv_row(item_num: str, lot_code: str, description: str,
+                     sale_name: str, seller_id: str, seller_seq: int) -> dict:
+    """
+    Build one row of the JnJ CSV.
+
+    Title format matches the JnJ sample: [item#][lot_code] [DESCRIPTION]
+    Example: '7936AS TALL FREESTANDING JEWLERY BOX'
+             '7942 2046 ROCKER' (space between if lot_code has digits)
+
+    Looking at sample titles: '7936AS', '7937AS', '7938A15C', '7939A9B'
+    the lot code is concatenated to item# with NO space, then a space, then desc.
+    So we do: title = f"{item_num}{lot_code} {description}"
+
+    Description column = just the plain description (no item# or lot code).
+
+    cf_SellerID = seller_id + zero-padded sequence (AA1000, AA1001, ...)
+    """
+    title = f"{item_num}{lot_code} {description}" if lot_code else f"{item_num} {description}"
+    row = {col: "" for col in JNJ_CSV_COLUMNS}
+    row.update(JNJ_DEFAULTS)
+    row["Category"] = sale_name
+    row["Title"] = title
+    row["Description"] = description
+    # cf_SellerID like "AA1000", "AA1001", ... starting from seller_seq
+    row["cf_SellerID"] = f"{seller_id}{seller_seq}" if seller_id else ""
+    return row
+
+
+@app.post("/api/export-jnj-csv")
+async def export_jnj_csv(
+    transcript: str = Form(...),
+    sale_name: str = Form(""),
+    seller_id: str = Form(""),
+    seller_start: int = Form(1000),
+):
+    """
+    Convert a cleaned transcript into a JnJ bulk-import CSV.
+    Returns the CSV as a downloadable file.
+
+    Form fields:
+      transcript   - the cleaned text output from /api/extract-stream
+      sale_name    - e.g. "APRIL 16 ~ Q SALE"  (goes in Category column)
+      seller_id    - e.g. "AA"  (prefix for cf_SellerID)
+      seller_start - starting sequence number (default 1000, so AA1000, AA1001...)
+    """
+    items = parse_item_lines(transcript)
+    if not items:
+        raise HTTPException(400, "No item rows found in the transcript.")
+
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=JNJ_CSV_COLUMNS, quoting=csv.QUOTE_MINIMAL)
+    writer.writeheader()
+    for idx, (item_num, lot_code, description) in enumerate(items):
+        row = build_jnj_csv_row(
+            item_num, lot_code, description,
+            sale_name, seller_id, seller_start + idx,
+        )
+        writer.writerow(row)
+
+    csv_bytes = output.getvalue().encode("utf-8-sig")  # BOM helps Excel open UTF-8 cleanly
+    # Filename: jnj-<sale-slug>-<n>.csv
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", sale_name.strip()).strip("-").lower() or "export"
+    filename = f"jnj-{slug}-{len(items)}items.csv"
+    return Response(
+        content=csv_bytes,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @app.get("/api/health")
 def health():
     return {"ok": True}
+
+
+# =========================================================================
+# JnJ Sale Builder: sheet + photos → preview → import-ready zip
+# =========================================================================
+#
+# Flow:
+#   1. POST /api/jnj-build   → upload sheet + photos, get JSON preview
+#      { items: [{item_num, lot_code, description}, ...],
+#        photos: [{id, filename, tag_read, matched_item_num, match_kind}, ...] }
+#   2. Frontend renders preview; user can drag photos between items or click retry
+#   3. POST /api/jnj-rematch → optional: re-run AI on one photo
+#   4. POST /api/jnj-zip     → upload the final item-list JSON + all photo files,
+#      returns a zip: {items.csv, <renamed photo files>}
+#
+# Photos are transient — the frontend keeps the actual bytes and re-uploads
+# them at zip time. This avoids storing files on the ephemeral Render box.
+# =========================================================================
+
+# --- Photo tag reading ---
+
+JNJ_PHOTO_SYSTEM_PROMPT = """You look at photos of items at an estate/consignment auction. Each item has a paper tag with an item number (like 7942, G6182, 10686FV). Sometimes the tag is clearly visible in the photo. Sometimes there is no tag at all, or the tag is unreadable.
+
+Your job:
+1. Look for a paper tag with a number in the photo.
+2. If you see a clearly readable item number on a tag, respond with EXACTLY that number (e.g. "7942" or "G6182"). Read it exactly as written — keep any letter prefix like G, F, or suffix.
+3. If you do NOT see a readable item-number tag, respond with EXACTLY "NO_TAG" and then a brief 2-8 word description of the item on the next line (like "NO_TAG\nWooden rocking chair").
+
+Do not guess. If a tag is blurry or partially hidden, say NO_TAG. Only return an item number if you are confident.
+
+Response format (item number found):
+  7942
+
+Response format (no tag):
+  NO_TAG
+  wooden rocking chair
+"""
+
+async def read_photo_tag(image_bytes: bytes, media_type: str) -> Dict[str, str]:
+    """Ask the vision model to read an item-number tag or fall back to a description.
+
+    Returns:
+      {'tag': 'G6182'}                        - if a tag was read
+      {'tag': '', 'description': 'rocker'}     - if no tag but got description
+    """
+    try:
+        # Downscale big photos to keep API calls fast and cheap. Vision handles
+        # 1024px just fine for reading item tags.
+        img = Image.open(io.BytesIO(image_bytes))
+        img = img.convert("RGB")
+        img.thumbnail((1024, 1024))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        small_bytes = buf.getvalue()
+        b64 = base64.standard_b64encode(small_bytes).decode("utf-8")
+        data_url = f"data:image/jpeg;base64,{b64}"
+
+        resp = await client.chat.completions.create(
+            model="gpt-4o",
+            max_tokens=100,
+            messages=[
+                {"role": "system", "content": JNJ_PHOTO_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": data_url, "detail": "high"}},
+                        {"type": "text", "text": "What's in this photo? Item number on a tag, or NO_TAG + description."},
+                    ],
+                },
+            ],
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        lines = [l.strip() for l in raw.splitlines() if l.strip()]
+        if not lines:
+            return {"tag": "", "description": ""}
+        first = lines[0].upper()
+        if first.startswith("NO_TAG"):
+            desc = lines[1] if len(lines) > 1 else ""
+            return {"tag": "", "description": desc.lower()}
+        # Sometimes the model wraps the tag in quotes or extra words
+        tag_match = re.search(r"([A-Z]?\d{2,}[A-Z]*)", first)
+        if tag_match:
+            return {"tag": tag_match.group(1), "description": ""}
+        return {"tag": "", "description": first.lower()}
+    except Exception as e:
+        # Best-effort: don't fail the whole build if one photo errors
+        return {"tag": "", "description": "", "error": str(e)}
+
+
+async def match_photo_by_description(photo_desc: str, items: List[Dict]) -> Optional[str]:
+    """Given a short description like 'wooden rocking chair' and a list of
+    items, ask the AI to pick the best-matching item_num. Returns the item_num
+    string or None."""
+    if not photo_desc or not items:
+        return None
+
+    # Build a compact list for the prompt
+    lines = [f"{i['item_num']}: {i['description']}" for i in items]
+    prompt = (
+        "A photo shows: " + photo_desc + "\n\n"
+        "Which of these auction items best matches the photo? Respond with ONLY the item number, or NONE if no match is clear.\n\n"
+        + "\n".join(lines)
+    )
+    try:
+        resp = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            max_tokens=30,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = (resp.choices[0].message.content or "").strip().upper()
+        if raw == "NONE" or not raw:
+            return None
+        m = re.match(r"^([A-Z]?\d+[A-Z]*)", raw)
+        if not m:
+            return None
+        candidate = m.group(1)
+        # Only return if it's actually in our item list
+        valid = {i["item_num"] for i in items}
+        return candidate if candidate in valid else None
+    except Exception:
+        return None
+
+
+def parse_items_from_transcript(transcript: str) -> List[Dict[str, str]]:
+    """Wrap parse_item_lines to return dicts (easier for JSON)."""
+    tuples = parse_item_lines(transcript)
+    return [
+        {"item_num": t[0], "lot_code": t[1], "description": t[2]}
+        for t in tuples
+    ]
+
+
+async def transcribe_uploaded_sheet(sheet: UploadFile) -> str:
+    """Transcribe an uploaded sheet (PDF or image) to a cleaned transcript.
+    Reuses the existing image / PDF logic without SSE streaming.
+    """
+    data = await sheet.read()
+    fname = (sheet.filename or "").lower()
+    if fname.endswith(".pdf"):
+        page_bytes_list = render_pdf_pages(data, dpi=180)
+        page_texts = []
+        for pb in page_bytes_list:
+            if is_blank_image(pb):
+                continue
+            page_texts.append(await transcribe_image(pb, "image/png"))
+        return "\n".join(page_texts)
+    else:
+        # image path
+        media_type = sheet.content_type or "image/jpeg"
+        if not media_type.startswith("image/"):
+            media_type = "image/jpeg"
+        text = await transcribe_image(data, media_type)
+        return text
+
+
+@app.post("/api/jnj-build")
+async def jnj_build(files: List[UploadFile] = File(...)):
+    """Analyze a JnJ sale intake.
+
+    Inputs (multipart):
+      files - one PDF/image sheet + N item photos, all in one upload
+
+    Auto-detects which file is the sheet:
+      - .pdf                          → sheet
+      - single largest image          → sheet (heuristic, fallback)
+      - explicit filename hints ('sheet', 'file', 'intake')
+
+    Response JSON:
+      {
+        transcript: "...cleaned...",
+        items: [{item_num, lot_code, description}, ...],
+        photos: [{id, filename, thumb_data_url, tag_read, item_num_match, match_kind}, ...]
+      }
+
+    match_kind is one of: 'tag' | 'desc' | 'none'
+    """
+    if not files:
+        raise HTTPException(400, "No files uploaded.")
+
+    # Separate the sheet from the photos.
+    sheet: Optional[UploadFile] = None
+    photos: List[UploadFile] = []
+    # First pass: PDF is always the sheet.
+    for f in files:
+        if (f.filename or "").lower().endswith(".pdf") and sheet is None:
+            sheet = f
+        else:
+            photos.append(f)
+    # Second pass: if still no sheet, use filename hints.
+    if sheet is None:
+        for i, f in enumerate(photos):
+            n = (f.filename or "").lower()
+            if any(hint in n for hint in ["sheet", "intake", "file "]) or n.startswith("file"):
+                sheet = photos.pop(i)
+                break
+    # Third pass: use the LARGEST file as the sheet (intake photos are usually higher-res than item shots)
+    if sheet is None and photos:
+        # Read all sizes
+        sized = []
+        for f in photos:
+            data = await f.read()
+            await f.seek(0)
+            sized.append((len(data), f))
+        sized.sort(key=lambda x: -x[0])
+        sheet = sized[0][1]
+        photos = [f for _, f in sized[1:]]
+
+    if sheet is None:
+        raise HTTPException(400, "Couldn't identify a sheet in the upload.")
+
+    # 1) Transcribe the sheet
+    transcript = await transcribe_uploaded_sheet(sheet)
+    items = parse_items_from_transcript(transcript)
+    if not items:
+        raise HTTPException(400, f"Sheet transcribed but no item rows were parsed. Transcript: {transcript[:500]}")
+
+    # 2) Process every photo in parallel: read bytes, get thumb, ask AI for tag
+    async def process_photo(idx: int, photo: UploadFile) -> Dict:
+        raw = await photo.read()
+        # Build a small base64 thumb for the preview UI (200x200)
+        try:
+            img = Image.open(io.BytesIO(raw))
+            img = img.convert("RGB")
+            img.thumbnail((200, 200))
+            tbuf = io.BytesIO()
+            img.save(tbuf, format="JPEG", quality=75)
+            thumb_b64 = base64.standard_b64encode(tbuf.getvalue()).decode("utf-8")
+            thumb_data_url = f"data:image/jpeg;base64,{thumb_b64}"
+        except Exception:
+            thumb_data_url = ""
+
+        # Ask AI for tag / description
+        media_type = photo.content_type or "image/jpeg"
+        if not media_type.startswith("image/"):
+            media_type = "image/jpeg"
+        read = await read_photo_tag(raw, media_type)
+
+        return {
+            "id": f"p{idx}",
+            "filename": photo.filename or f"photo_{idx}.jpg",
+            "thumb_data_url": thumb_data_url,
+            "tag_read": read.get("tag", ""),
+            "description_read": read.get("description", ""),
+        }
+
+    photo_infos = await asyncio.gather(*[process_photo(i, p) for i, p in enumerate(photos)])
+
+    # 3) Match photos to items
+    valid_items = {i["item_num"] for i in items}
+
+    # First pass: tag matches (highest confidence)
+    for p in photo_infos:
+        tag = p.get("tag_read", "")
+        if tag and tag in valid_items:
+            p["item_num_match"] = tag
+            p["match_kind"] = "tag"
+        else:
+            p["item_num_match"] = ""
+            p["match_kind"] = "none"
+
+    # Second pass: description matches for photos that didn't get a tag hit
+    async def desc_match(p):
+        if p["match_kind"] != "none":
+            return
+        desc = p.get("description_read", "")
+        if not desc:
+            return
+        matched = await match_photo_by_description(desc, items)
+        if matched:
+            p["item_num_match"] = matched
+            p["match_kind"] = "desc"
+
+    await asyncio.gather(*[desc_match(p) for p in photo_infos])
+
+    return JSONResponse({
+        "transcript": transcript,
+        "items": items,
+        "photos": photo_infos,
+    })
+
+
+@app.post("/api/jnj-rematch")
+async def jnj_rematch(
+    photo_id: str = Form(...),
+    description: str = Form(""),
+    items_json: str = Form(...),
+):
+    """Retry description-based match for one photo. Client passes the photo's
+    description_read and the current item list; we return a new item_num or empty."""
+    try:
+        items = json.loads(items_json)
+    except Exception:
+        raise HTTPException(400, "Bad items_json")
+    if not description:
+        return JSONResponse({"item_num_match": ""})
+    matched = await match_photo_by_description(description, items)
+    return JSONResponse({"item_num_match": matched or ""})
+
+
+@app.post("/api/jnj-zip")
+async def jnj_zip(
+    sale_name: str = Form(""),
+    seller_id: str = Form(""),
+    seller_start: int = Form(1000),
+    items_json: str = Form(...),
+    photo_map_json: str = Form(...),
+    photos: List[UploadFile] = File(default=[]),
+):
+    """Build the final import-ready zip.
+
+    Inputs (multipart):
+      sale_name       - category / sale name (e.g. 'AUGUST 27~ H SALE')
+      seller_id       - prefix like 'AA'
+      seller_start    - starting sequence number
+      items_json      - JSON array of {item_num, lot_code, description} (post-edit)
+      photo_map_json  - JSON dict { photo_filename: item_num, ... }
+      photos          - the original photo files (uploaded again by the frontend)
+
+    Zip contents:
+      items.csv
+      <sellerid>_<itemnum>_<seq>.<ext>   for every matched photo
+    """
+    try:
+        items = json.loads(items_json)
+        photo_map = json.loads(photo_map_json)  # {filename: item_num}
+    except Exception as e:
+        raise HTTPException(400, f"Bad JSON: {e}")
+
+    if not items:
+        raise HTTPException(400, "No items provided.")
+
+    # Group photos by item_num, preserving upload order.
+    photos_by_item: Dict[str, List[UploadFile]] = {}
+    for p in photos:
+        target = photo_map.get(p.filename or "")
+        if not target:
+            continue
+        photos_by_item.setdefault(target, []).append(p)
+
+    # Build the zip in memory
+    zip_buf = io.BytesIO()
+    csv_buf = io.StringIO()
+    writer = csv.DictWriter(csv_buf, fieldnames=JNJ_CSV_COLUMNS, quoting=csv.QUOTE_MINIMAL)
+    writer.writeheader()
+
+    # For each item build a row and, if it has photos, name them + fill image_1..N
+    photo_files: List[Tuple[str, bytes]] = []  # (name_in_zip, bytes)
+    for idx, it in enumerate(items):
+        item_num = it.get("item_num", "")
+        lot_code = it.get("lot_code", "")
+        description = it.get("description", "")
+        row = build_jnj_csv_row(
+            item_num, lot_code, description,
+            sale_name, seller_id, seller_start + idx,
+        )
+        # Enforce Title max 60 chars per JnJ spec
+        if len(row.get("Title", "")) > 60:
+            row["Title"] = row["Title"][:60].rstrip()
+
+        # Rename photos for this item: <sellerid>_<itemnum>_001.<ext>
+        item_photos = photos_by_item.get(item_num, [])
+        for photo_idx, p in enumerate(item_photos[:20], start=1):
+            ext = (p.filename or "photo.jpg").rsplit(".", 1)[-1].lower()
+            if ext not in ("jpg", "jpeg", "png", "webp", "gif", "bmp", "heic"):
+                ext = "jpg"
+            seller_full = f"{seller_id}{seller_start + idx}" if seller_id else f"item{seller_start + idx}"
+            new_name = f"{seller_full}_{item_num}_{photo_idx:03d}.{ext}"
+            data = await p.read()
+            # Reset the file position so we don't consume it if it's used again
+            await p.seek(0)
+            photo_files.append((new_name, data))
+            row[f"image_{photo_idx}"] = new_name
+
+        writer.writerow(row)
+
+    # Write the zip
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("items.csv", csv_buf.getvalue().encode("utf-8-sig"))
+        for name, data in photo_files:
+            zf.writestr(name, data)
+
+    zip_bytes = zip_buf.getvalue()
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", sale_name.strip()).strip("-").lower() or "jnj-sale"
+    filename = f"jnj-{slug}-{len(items)}items.zip"
+    return Response(
+        content=zip_bytes,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

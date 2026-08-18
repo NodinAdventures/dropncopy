@@ -52,26 +52,88 @@
   </header>
 
   <main class="app-main">
-    <!-- Drop zone -->
-    <section class="drop-section">
-      <div id="dropZone" class="dropzone" tabindex="0" role="button" aria-label="Drop files or click to select">
-        <input id="fileInput" type="file" multiple hidden />
-        <div class="dropzone-inner">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-            <polyline points="17 8 12 3 7 8" />
-            <line x1="12" y1="3" x2="12" y2="15" />
-          </svg>
-          <div class="dropzone-title">Drop files here</div>
-          <div class="dropzone-sub">or <span class="link">click to browse</span> · PDF, images, DOCX, TXT · handwriting supported</div>
+    <!-- Two-box drop section -->
+    <section class="drop-section drop-section-split">
+
+      <!-- Box 1: Original retype-only drop -->
+      <div class="drop-box">
+        <div class="drop-box-header">
+          <div class="drop-box-title">Retype only</div>
+          <div class="drop-box-sub">Handwritten sheet → text · CSV export</div>
+        </div>
+        <div id="dropZone" class="dropzone" tabindex="0" role="button" aria-label="Drop files or click to select">
+          <input id="fileInput" type="file" multiple hidden />
+          <div class="dropzone-inner">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="17 8 12 3 7 8" />
+              <line x1="12" y1="3" x2="12" y2="15" />
+            </svg>
+            <div class="dropzone-title">Drop files here</div>
+            <div class="dropzone-sub">or <span class="link">click to browse</span> · PDF, images, DOCX, TXT · handwriting supported</div>
+          </div>
         </div>
       </div>
 
-      <!-- Processing tray -->
+      <!-- Box 2: JnJ Sale Builder (sheet + photos → zip) -->
+      <div class="drop-box drop-box-jnj">
+        <div class="drop-box-header">
+          <div class="drop-box-title">JnJ Sale Builder</div>
+          <div class="drop-box-sub">Sheet + photos → import-ready zip</div>
+        </div>
+        <div id="jnjDropZone" class="dropzone dropzone-jnj" tabindex="0" role="button" aria-label="Drop sheet and photos for JnJ Sale Builder">
+          <input id="jnjFileInput" type="file" multiple hidden accept=".pdf,image/*" />
+          <div class="dropzone-inner">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="3" y="3" width="7" height="7" rx="1" />
+              <rect x="14" y="3" width="7" height="7" rx="1" />
+              <rect x="3" y="14" width="7" height="7" rx="1" />
+              <rect x="14" y="14" width="7" height="7" rx="1" />
+            </svg>
+            <div class="dropzone-title">Drop sheet + photos here</div>
+            <div class="dropzone-sub">or <span class="link">click to browse</span> · one PDF/image sheet + item photos</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Processing tray (shared) -->
       <div id="processingTray" class="processing-tray hidden">
         <div class="tray-title">Processing…</div>
         <ul id="processingList"></ul>
       </div>
+    </section>
+
+    <!-- JnJ Sale Preview (hidden until a sale is built) -->
+    <section id="jnjPreview" class="jnj-preview hidden">
+      <div class="jnj-preview-head">
+        <div>
+          <h2>JnJ Sale Preview</h2>
+          <div class="jnj-preview-sub" id="jnjPreviewSub">Review items and photo matches before exporting.</div>
+        </div>
+        <div class="jnj-preview-actions">
+          <button id="jnjCancelBtn" class="ghost-btn">Cancel</button>
+          <button id="jnjDownloadBtn" class="action-btn primary">Download ZIP</button>
+        </div>
+      </div>
+      <div class="jnj-preview-fields">
+        <label class="jnj-field">
+          <span>Category / Sale name</span>
+          <input id="jnjSaleName" type="text" placeholder="AUGUST 27~ H SALE" />
+        </label>
+        <label class="jnj-field">
+          <span>Seller ID prefix</span>
+          <input id="jnjSellerId" type="text" placeholder="AA" />
+        </label>
+        <label class="jnj-field">
+          <span>Starting number</span>
+          <input id="jnjSellerStart" type="number" placeholder="1000" />
+        </label>
+        <label class="jnj-field jnj-field-photos">
+          <span>Unmatched photos</span>
+          <div class="jnj-unmatched" id="jnjUnmatched"><em>none</em></div>
+        </label>
+      </div>
+      <div id="jnjItemsList" class="jnj-items-list"></div>
     </section>
 
     <!-- Entries -->

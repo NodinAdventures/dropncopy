@@ -19,6 +19,29 @@ const AUTH_KEY = "retype_authed_v1";
 const EXTRACT_URL = "__PORT_5000__".startsWith("__")
   ? "/api/extract-stream"
   : "__PORT_5000__/api/extract-stream";
+const CSV_EXPORT_URL = "__PORT_5000__".startsWith("__")
+  ? "/api/export-jnj-csv"
+  : "__PORT_5000__/api/export-jnj-csv";
+const JNJ_BUILD_URL = "__PORT_5000__".startsWith("__")
+  ? "/api/jnj-build"
+  : "__PORT_5000__/api/jnj-build";
+const JNJ_REMATCH_URL = "__PORT_5000__".startsWith("__")
+  ? "/api/jnj-rematch"
+  : "__PORT_5000__/api/jnj-rematch";
+const JNJ_ZIP_URL = "__PORT_5000__".startsWith("__")
+  ? "/api/jnj-zip"
+  : "__PORT_5000__/api/jnj-zip";
+
+// Remember the last-used sale name and seller ID prefix so the user doesn't
+// have to retype for every entry in the same session.
+const CSV_PREFS_KEY = "retype_csv_prefs_v1";
+function loadCsvPrefs() {
+  try { return JSON.parse(localStorage.getItem(CSV_PREFS_KEY) || "{}"); }
+  catch { return {}; }
+}
+function saveCsvPrefs(prefs) {
+  try { localStorage.setItem(CSV_PREFS_KEY, JSON.stringify(prefs)); } catch {}
+}
 
 /* -------------------- DOM refs -------------------- */
 const lockScreen = document.getElementById("lockScreen");
@@ -367,6 +390,10 @@ function entryCard(entry) {
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
         Copy
       </button>
+      <button class="action-btn" data-act="csv">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="16" y2="17"/></svg>
+        JnJ CSV
+      </button>
       <button class="action-btn" data-act="email">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
         Email
@@ -409,6 +436,7 @@ function entryCard(entry) {
       const act = btn.dataset.act;
       const text = textarea.value;
       if (act === "copy") copyText(text);
+      else if (act === "csv") downloadJnjCsv(text, entry.name);
       else if (act === "email") emailText(entry.name, text);
       else if (act === "print") printCard(card);
       else if (act === "delete") {
@@ -470,6 +498,120 @@ function emailText(name, text) {
   window.location.href = `mailto:?subject=${subject}&body=${body}`;
 }
 
+async function downloadJnjCsv(transcript, sourceName) {
+  const prefs = loadCsvPrefs();
+  const dialog = showCsvDialog(prefs);
+  const result = await dialog.result;
+  if (!result) return; // user cancelled
+
+  const { saleName, sellerId, sellerStart } = result;
+  saveCsvPrefs({ saleName, sellerId, sellerStart });
+
+  const fd = new FormData();
+  fd.append("transcript", transcript);
+  fd.append("sale_name", saleName);
+  fd.append("seller_id", sellerId);
+  fd.append("seller_start", String(sellerStart));
+
+  let res;
+  try {
+    res = await fetch(CSV_EXPORT_URL, { method: "POST", body: fd });
+  } catch (e) {
+    toast("Network error — could not build CSV");
+    return;
+  }
+  if (!res.ok) {
+    let msg = `CSV export failed (${res.status})`;
+    try { const j = await res.json(); if (j.detail) msg = j.detail; } catch {}
+    toast(msg);
+    return;
+  }
+
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  // Try to extract filename from Content-Disposition header
+  const disp = res.headers.get("content-disposition") || "";
+  const m = disp.match(/filename="([^"]+)"/);
+  a.download = m ? m[1] : `jnj-export.csv`;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => {
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, 100);
+  toast("CSV downloaded");
+}
+
+function showCsvDialog(prefs) {
+  // Build a modal dialog for sale name + seller ID input
+  const backdrop = document.createElement("div");
+  backdrop.className = "csv-dialog-backdrop";
+  backdrop.innerHTML = `
+    <div class="csv-dialog">
+      <h3>Download JnJ CSV</h3>
+      <p class="csv-dialog-sub">Fill these in to build the JnJ import file. Values are remembered for next time.</p>
+      <label class="csv-field">
+        <span>Sale name</span>
+        <input type="text" id="csvSaleName" placeholder="e.g. APRIL 16 ~ Q SALE" value="${escapeAttr(prefs.saleName || '')}" />
+        <small>Goes in the Category column of the CSV</small>
+      </label>
+      <label class="csv-field">
+        <span>Seller ID prefix</span>
+        <input type="text" id="csvSellerId" placeholder="e.g. AA" value="${escapeAttr(prefs.sellerId || 'AA')}" />
+        <small>Combined with the starting number to make cf_SellerID (e.g. AA1961)</small>
+      </label>
+      <label class="csv-field">
+        <span>Starting number</span>
+        <input type="number" id="csvSellerStart" min="0" step="1" value="${escapeAttr(prefs.sellerStart || 1000)}" />
+        <small>First row gets this number, then it counts up (1000, 1001, 1002...)</small>
+      </label>
+      <div class="csv-dialog-actions">
+        <button type="button" class="action-btn" id="csvCancel">Cancel</button>
+        <button type="button" class="action-btn primary" id="csvOk">Download CSV</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+
+  const saleInput = backdrop.querySelector("#csvSaleName");
+  const sellerInput = backdrop.querySelector("#csvSellerId");
+  const startInput = backdrop.querySelector("#csvSellerStart");
+  setTimeout(() => saleInput.focus(), 30);
+
+  const result = new Promise((resolve) => {
+    const cleanup = () => backdrop.remove();
+    backdrop.querySelector("#csvCancel").addEventListener("click", () => {
+      cleanup(); resolve(null);
+    });
+    backdrop.querySelector("#csvOk").addEventListener("click", () => {
+      const saleName = saleInput.value.trim();
+      const sellerId = sellerInput.value.trim().toUpperCase();
+      const sellerStart = parseInt(startInput.value, 10) || 1000;
+      cleanup();
+      resolve({ saleName, sellerId, sellerStart });
+    });
+    backdrop.addEventListener("click", (e) => {
+      if (e.target === backdrop) { cleanup(); resolve(null); }
+    });
+    backdrop.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") { cleanup(); resolve(null); }
+      else if (e.key === "Enter" && e.target.tagName === "INPUT") {
+        backdrop.querySelector("#csvOk").click();
+      }
+    });
+  });
+
+  return { result };
+}
+
+function escapeAttr(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  }[c]));
+}
+
 function printCard(card) {
   card.classList.add("print-target");
   // Sync textarea value into DOM for print (textarea .value doesn't print reliably)
@@ -502,6 +644,396 @@ function toast(msg) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => toastEl.classList.remove("show"), 2000);
 }
+
+/* =========================================================
+   JnJ Sale Builder
+   - Second dropzone that takes a sheet + photos together
+   - Sends everything to /api/jnj-build
+   - Renders a preview with per-item photo assignments
+   - User can retry AI match, drag photos between items,
+     or drop a photo back onto the "unmatched" pool
+   - Download button POSTs to /api/jnj-zip → downloads zip
+========================================================= */
+
+const jnjDropZone = document.getElementById("jnjDropZone");
+const jnjFileInput = document.getElementById("jnjFileInput");
+const jnjPreview = document.getElementById("jnjPreview");
+const jnjItemsList = document.getElementById("jnjItemsList");
+const jnjUnmatched = document.getElementById("jnjUnmatched");
+const jnjSaleName = document.getElementById("jnjSaleName");
+const jnjSellerId = document.getElementById("jnjSellerId");
+const jnjSellerStart = document.getElementById("jnjSellerStart");
+const jnjPreviewSub = document.getElementById("jnjPreviewSub");
+const jnjDownloadBtn = document.getElementById("jnjDownloadBtn");
+const jnjCancelBtn = document.getElementById("jnjCancelBtn");
+
+// State: current build session in memory
+let jnjState = null;
+// Shape:
+//   items: [{item_num, lot_code, description}]
+//   photos: Map<filename, {file: File, thumb: string, tag_read, description_read, item_num_match, match_kind}>
+//   itemPhotos: { item_num: [filename, ...] }  // ordered
+//   unmatched: [filename, ...]
+
+function jnjResetState() {
+  jnjState = null;
+  jnjPreview.classList.add("hidden");
+  jnjItemsList.innerHTML = "";
+  jnjUnmatched.innerHTML = "<em>none</em>";
+}
+
+function jnjRestorePrefs() {
+  const prefs = loadCsvPrefs();
+  if (prefs.sale_name) jnjSaleName.value = prefs.sale_name;
+  if (prefs.seller_id) jnjSellerId.value = prefs.seller_id;
+  if (prefs.seller_start) jnjSellerStart.value = prefs.seller_start;
+}
+
+function jnjSavePrefs() {
+  saveCsvPrefs({
+    sale_name: jnjSaleName.value.trim(),
+    seller_id: jnjSellerId.value.trim(),
+    seller_start: jnjSellerStart.value.trim() || "1000",
+  });
+}
+
+// Wire up the dropzone (mirrors the existing dropzone code)
+jnjDropZone.addEventListener("click", () => jnjFileInput.click());
+jnjDropZone.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" || e.key === " ") { e.preventDefault(); jnjFileInput.click(); }
+});
+jnjFileInput.addEventListener("change", (e) => {
+  jnjHandleFiles(Array.from(e.target.files));
+  jnjFileInput.value = "";
+});
+
+["dragenter", "dragover"].forEach(ev =>
+  jnjDropZone.addEventListener(ev, (e) => {
+    e.preventDefault(); e.stopPropagation();
+    // Only visually highlight if this isn't a photo-thumb drag (that has our custom type)
+    if (!e.dataTransfer.types.includes("application/x-jnj-photo")) {
+      jnjDropZone.classList.add("drag-over");
+    }
+  })
+);
+["dragleave", "drop"].forEach(ev =>
+  jnjDropZone.addEventListener(ev, (e) => {
+    e.preventDefault(); e.stopPropagation();
+    jnjDropZone.classList.remove("drag-over");
+  })
+);
+jnjDropZone.addEventListener("drop", (e) => {
+  if (e.dataTransfer.types.includes("application/x-jnj-photo")) return; // photo-thumb drag, ignore
+  const files = Array.from(e.dataTransfer.files || []);
+  if (files.length) jnjHandleFiles(files);
+});
+
+async function jnjHandleFiles(files) {
+  if (!files.length) return;
+  if (files.length < 2) {
+    toast("Drop the sheet + at least one photo together.");
+    return;
+  }
+
+  // Restore last-used pref values into the fields on first use
+  jnjRestorePrefs();
+
+  // Show a simple processing indicator by hijacking the shared tray
+  processingTray.classList.remove("hidden");
+  processingList.innerHTML = "";
+  const li = document.createElement("li");
+  li.innerHTML = `<span class="spinner"></span><span class="name">JnJ Sale Builder</span><span class="status">reading sheet + matching photos… this can take 1–2 min for 20+ photos</span>`;
+  processingList.appendChild(li);
+  const statusEl = li.querySelector(".status");
+
+  try {
+    const fd = new FormData();
+    for (const f of files) fd.append("files", f);
+    const res = await fetch(JNJ_BUILD_URL, { method: "POST", body: fd });
+    if (!res.ok) {
+      let msg = `server error (${res.status})`;
+      try { const j = await res.json(); msg = j.detail || msg; } catch {}
+      throw new Error(msg);
+    }
+    const data = await res.json();
+    statusEl.textContent = `done — ${data.items.length} items, ${data.photos.length} photos`;
+    li.querySelector(".spinner").outerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color: var(--success); flex-shrink:0;"><polyline points="20 6 9 17 4 12"/></svg>`;
+    setTimeout(() => { processingList.innerHTML = ""; processingTray.classList.add("hidden"); }, 2500);
+
+    // Match the returned photo filenames to the actual File objects we still hold
+    const photoMap = new Map();
+    // Build a filename lookup among the uploaded files
+    const filesByName = new Map();
+    for (const f of files) filesByName.set(f.name, f);
+    for (const p of data.photos) {
+      photoMap.set(p.filename, {
+        id: p.id,
+        file: filesByName.get(p.filename) || null,
+        thumb: p.thumb_data_url,
+        tag_read: p.tag_read,
+        description_read: p.description_read,
+        item_num_match: p.item_num_match,
+        match_kind: p.match_kind,
+      });
+    }
+
+    // Build item→photos and unmatched lists
+    const itemPhotos = {};
+    const unmatched = [];
+    for (const it of data.items) itemPhotos[it.item_num] = [];
+    for (const [fname, info] of photoMap) {
+      if (info.item_num_match && itemPhotos[info.item_num_match]) {
+        itemPhotos[info.item_num_match].push(fname);
+      } else {
+        unmatched.push(fname);
+      }
+    }
+
+    jnjState = { items: data.items, photos: photoMap, itemPhotos, unmatched };
+    jnjRenderPreview();
+  } catch (err) {
+    console.error(err);
+    statusEl.textContent = err.message || "failed";
+    li.classList.add("error");
+    li.querySelector(".spinner").outerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color: var(--danger); flex-shrink:0;"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>`;
+    setTimeout(() => { processingList.innerHTML = ""; processingTray.classList.add("hidden"); }, 5000);
+  }
+}
+
+function jnjRenderPreview() {
+  if (!jnjState) return;
+  jnjPreview.classList.remove("hidden");
+
+  // Summary sub-text
+  const total = jnjState.photos.size;
+  const matched = total - jnjState.unmatched.length;
+  jnjPreviewSub.textContent = `${jnjState.items.length} items · ${total} photos · ${matched} matched, ${jnjState.unmatched.length} unmatched. Drag photos between items to fix, or click Retry.`;
+
+  // Restore preference values into fields (only if empty, so we don't clobber user edits)
+  jnjRestorePrefs();
+
+  // Items list
+  jnjItemsList.innerHTML = "";
+  for (const it of jnjState.items) {
+    const card = document.createElement("div");
+    card.className = "jnj-item-card";
+    card.dataset.itemNum = it.item_num;
+
+    const lotHtml = it.lot_code ? `<span class="lot-code">${escapeHtml(it.lot_code)}</span>` : "";
+    const photos = jnjState.itemPhotos[it.item_num] || [];
+    const photosHtml = photos.length
+      ? photos.map(fname => jnjPhotoThumbHtml(fname)).join("")
+      : `<div class="jnj-item-photos empty">no photo</div>`;
+
+    // Determine badge from first photo (if any)
+    let badgeHtml = "";
+    if (photos.length) {
+      const firstInfo = jnjState.photos.get(photos[0]);
+      const kind = firstInfo ? firstInfo.match_kind : "none";
+      const label = { tag: "TAG", desc: "DESC", manual: "MANUAL", none: "" }[kind] || "";
+      if (label) badgeHtml = `<span class="jnj-match-badge ${kind}">${label}</span>`;
+    }
+
+    card.innerHTML = `
+      <div class="jnj-item-num">${escapeHtml(it.item_num)}<small>#${jnjState.items.indexOf(it) + 1}</small></div>
+      <div class="jnj-item-desc">${lotHtml}${escapeHtml(it.description)}</div>
+      <div class="jnj-item-actions">
+        ${badgeHtml}
+        <div class="jnj-item-photos">${photosHtml}</div>
+        <button class="jnj-retry-btn" data-item="${escapeAttr(it.item_num)}">↻ Retry match</button>
+      </div>
+    `;
+    jnjItemsList.appendChild(card);
+
+    // Drag targets
+    card.addEventListener("dragover", (e) => {
+      if (e.dataTransfer.types.includes("application/x-jnj-photo")) {
+        e.preventDefault();
+        card.classList.add("drag-over");
+      }
+    });
+    card.addEventListener("dragleave", () => card.classList.remove("drag-over"));
+    card.addEventListener("drop", (e) => {
+      if (!e.dataTransfer.types.includes("application/x-jnj-photo")) return;
+      e.preventDefault();
+      card.classList.remove("drag-over");
+      const fname = e.dataTransfer.getData("application/x-jnj-photo");
+      jnjMovePhotoTo(fname, it.item_num);
+    });
+    // Retry button
+    card.querySelector(".jnj-retry-btn").addEventListener("click", () => jnjRetryMatch(it.item_num));
+  }
+
+  // Unmatched photos pool
+  jnjUnmatched.innerHTML = jnjState.unmatched.length
+    ? jnjState.unmatched.map(fname => jnjPhotoThumbHtml(fname, true)).join("")
+    : "<em>none</em>";
+  jnjUnmatched.addEventListener("dragover", (e) => {
+    if (e.dataTransfer.types.includes("application/x-jnj-photo")) {
+      e.preventDefault();
+      jnjUnmatched.classList.add("drag-over");
+    }
+  });
+  jnjUnmatched.addEventListener("dragleave", () => jnjUnmatched.classList.remove("drag-over"));
+  jnjUnmatched.addEventListener("drop", (e) => {
+    if (!e.dataTransfer.types.includes("application/x-jnj-photo")) return;
+    e.preventDefault();
+    jnjUnmatched.classList.remove("drag-over");
+    const fname = e.dataTransfer.getData("application/x-jnj-photo");
+    jnjMovePhotoTo(fname, null);
+  });
+
+  // Wire up all thumbs (drag handlers)
+  document.querySelectorAll(".jnj-photo-thumb").forEach(el => {
+    el.setAttribute("draggable", "true");
+    el.addEventListener("dragstart", (e) => {
+      const fname = el.dataset.filename;
+      e.dataTransfer.setData("application/x-jnj-photo", fname);
+      e.dataTransfer.effectAllowed = "move";
+      el.classList.add("dragging");
+    });
+    el.addEventListener("dragend", () => el.classList.remove("dragging"));
+    // Remove-photo button (X)
+    const rm = el.querySelector(".jnj-photo-remove");
+    if (rm) rm.addEventListener("click", (e) => {
+      e.stopPropagation();
+      jnjMovePhotoTo(el.dataset.filename, null);
+    });
+  });
+}
+
+function jnjPhotoThumbHtml(fname, isUnmatched = false) {
+  const info = jnjState.photos.get(fname);
+  if (!info) return "";
+  const cls = isUnmatched ? "jnj-photo-thumb unmatched" : "jnj-photo-thumb";
+  const tagBadge = info.tag_read ? ` title="Tag: ${escapeAttr(info.tag_read)}"` : (info.description_read ? ` title="${escapeAttr(info.description_read)}"` : "");
+  return `<div class="${cls}" data-filename="${escapeAttr(fname)}"${tagBadge}>
+    <img src="${info.thumb}" alt="" />
+    <button class="jnj-photo-remove" title="Remove">×</button>
+  </div>`;
+}
+
+function jnjMovePhotoTo(fname, targetItemNum) {
+  if (!jnjState) return;
+  // Remove from wherever it currently is
+  for (const key of Object.keys(jnjState.itemPhotos)) {
+    jnjState.itemPhotos[key] = jnjState.itemPhotos[key].filter(f => f !== fname);
+  }
+  jnjState.unmatched = jnjState.unmatched.filter(f => f !== fname);
+
+  // Add to target
+  if (targetItemNum === null) {
+    jnjState.unmatched.push(fname);
+    const info = jnjState.photos.get(fname);
+    if (info) { info.item_num_match = ""; info.match_kind = "none"; }
+  } else if (jnjState.itemPhotos[targetItemNum] !== undefined) {
+    jnjState.itemPhotos[targetItemNum].push(fname);
+    const info = jnjState.photos.get(fname);
+    if (info) { info.item_num_match = targetItemNum; info.match_kind = "manual"; }
+  }
+  jnjRenderPreview();
+}
+
+async function jnjRetryMatch(itemNum) {
+  if (!jnjState) return;
+  const currentPhotos = jnjState.itemPhotos[itemNum] || [];
+  if (currentPhotos.length === 0) {
+    toast("No photo assigned to retry.");
+    return;
+  }
+  // Pop the first photo, ask AI to re-match it
+  const fname = currentPhotos[0];
+  const info = jnjState.photos.get(fname);
+  if (!info) return;
+
+  // Move it to unmatched first
+  jnjState.itemPhotos[itemNum] = jnjState.itemPhotos[itemNum].filter(f => f !== fname);
+  jnjState.unmatched.push(fname);
+  jnjRenderPreview();
+
+  // Ask backend for a new match (excluding the item that was wrong)
+  try {
+    const fd = new FormData();
+    fd.append("photo_id", info.id || fname);
+    fd.append("description", info.description_read || "");
+    // Filter out the wrong item from the list we send
+    const filteredItems = jnjState.items.filter(i => i.item_num !== itemNum);
+    fd.append("items_json", JSON.stringify(filteredItems));
+    const res = await fetch(JNJ_REMATCH_URL, { method: "POST", body: fd });
+    if (!res.ok) throw new Error(`retry failed (${res.status})`);
+    const data = await res.json();
+    if (data.item_num_match) {
+      jnjMovePhotoTo(fname, data.item_num_match);
+      toast(`Re-matched to ${data.item_num_match}.`);
+    } else {
+      toast("AI couldn't confidently re-match. Drag it manually.");
+    }
+  } catch (e) {
+    toast(e.message || "Retry failed");
+  }
+}
+
+async function jnjDownloadZip() {
+  if (!jnjState) return;
+  const saleName = jnjSaleName.value.trim();
+  const sellerId = jnjSellerId.value.trim();
+  const sellerStart = parseInt(jnjSellerStart.value.trim() || "1000", 10);
+  if (!saleName) { toast("Please enter the Category / Sale name."); jnjSaleName.focus(); return; }
+  if (!sellerId) { toast("Please enter the Seller ID prefix."); jnjSellerId.focus(); return; }
+
+  jnjSavePrefs();
+
+  jnjDownloadBtn.disabled = true;
+  const originalText = jnjDownloadBtn.textContent;
+  jnjDownloadBtn.textContent = "Building zip…";
+
+  try {
+    // Build photo_map (filename → item_num) from current state
+    const photoMap = {};
+    for (const [itemNum, fnames] of Object.entries(jnjState.itemPhotos)) {
+      for (const fname of fnames) photoMap[fname] = itemNum;
+    }
+
+    const fd = new FormData();
+    fd.append("sale_name", saleName);
+    fd.append("seller_id", sellerId);
+    fd.append("seller_start", String(sellerStart));
+    fd.append("items_json", JSON.stringify(jnjState.items));
+    fd.append("photo_map_json", JSON.stringify(photoMap));
+    // Attach every matched photo file
+    for (const fname of Object.keys(photoMap)) {
+      const info = jnjState.photos.get(fname);
+      if (info && info.file) fd.append("photos", info.file, fname);
+    }
+
+    const res = await fetch(JNJ_ZIP_URL, { method: "POST", body: fd });
+    if (!res.ok) {
+      let msg = `server error (${res.status})`;
+      try { const j = await res.json(); msg = j.detail || msg; } catch {}
+      throw new Error(msg);
+    }
+    const blob = await res.blob();
+    const cd = res.headers.get("Content-Disposition") || "";
+    const match = cd.match(/filename="([^"]+)"/);
+    const filename = match ? match[1] : `jnj-sale-${jnjState.items.length}items.zip`;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+    toast("Zip downloaded.");
+  } catch (e) {
+    console.error(e);
+    toast(e.message || "Download failed");
+  } finally {
+    jnjDownloadBtn.disabled = false;
+    jnjDownloadBtn.textContent = originalText;
+  }
+}
+
+jnjDownloadBtn.addEventListener("click", jnjDownloadZip);
+jnjCancelBtn.addEventListener("click", () => {
+  if (confirm("Discard this sale preview?")) jnjResetState();
+});
 
 /* -------------------- Init -------------------- */
 tryAuth();

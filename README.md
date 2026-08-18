@@ -16,7 +16,7 @@ A small web app that takes a handwritten JnJ auction intake sheet (PDF or image)
 1. User uploads a PDF or image of a handwritten intake sheet.
 2. Backend renders every PDF page to an image at 180 DPI (PyMuPDF).
 3. Blank pages are filtered out by a fast pixel check (PIL grayscale, <0.5% dark pixels = blank).
-4. Real pages are sent to the Claude Sonnet 4.5 vision model in parallel (asyncio.Semaphore of 8) with a detailed prompt describing the JnJ format rules.
+4. Real pages are sent to OpenAI's GPT-4o vision model in parallel (asyncio.Semaphore of 8) with a detailed prompt describing the JnJ format rules.
 5. Progress streams back over NDJSON so the frontend can show "page X of Y".
 6. The final transcript is sanitized (uppercase, disallowed chars removed, lot codes stripped) and returned.
 7. Frontend parses each line into an item card with a Copy button, and stacks the entry into the history at the bottom.
@@ -26,11 +26,11 @@ A small web app that takes a handwritten JnJ auction intake sheet (PDF or image)
 You need:
 
 - Python 3.10+
-- An Anthropic API key exported as `ANTHROPIC_API_KEY`
+- An OpenAI API key exported as `OPENAI_API_KEY`
 
 ```bash
-pip install fastapi uvicorn python-multipart anthropic pymupdf pillow
-export ANTHROPIC_API_KEY=sk-ant-...
+pip install -r requirements.txt
+export OPENAI_API_KEY=sk-...
 uvicorn server:app --host 0.0.0.0 --port 5000
 ```
 
