@@ -1009,6 +1009,11 @@ body {
   pointer-events: none;
 }
 .jnj-photo-thumb.dragging { opacity: 0.4; }
+.jnj-photo-thumb.selected {
+  outline: 3px solid var(--accent, #4f46e5);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 6px rgba(79, 70, 229, 0.15);
+}
 .jnj-photo-remove {
   position: absolute;
   top: 2px;

@@ -700,13 +700,8 @@ function jnjSavePrefs() {
 // The dropzone is now a native <label for="jnjFileInput"> which opens the
 // file picker natively on all platforms including iOS Safari. No JS click
 // handler needed. We only wire up the change and drag/drop events here.
-// DIAGNOSTIC: use alert() for visibility on mobile until we're sure the
-// pipeline works. Remove/replace once confirmed.
 jnjFileInput.addEventListener("change", (e) => {
-  const picked = Array.from(e.target.files || []);
-  // Big visible confirmation that the change event fired at all.
-  alert("JnJ: got " + picked.length + " file(s). Starting upload...");
-  jnjHandleFiles(picked);
+  jnjHandleFiles(Array.from(e.target.files || []));
   jnjFileInput.value = "";
 });
 
@@ -752,17 +747,10 @@ async function jnjHandleFiles(files) {
   try {
     const fd = new FormData();
     for (const f of files) fd.append("files", f);
-    let res;
-    try {
-      res = await fetch(JNJ_BUILD_URL, { method: "POST", body: fd });
-    } catch (netErr) {
-      alert("JnJ upload failed: network error — " + (netErr && netErr.message ? netErr.message : "unknown"));
-      throw netErr;
-    }
+    const res = await fetch(JNJ_BUILD_URL, { method: "POST", body: fd });
     if (!res.ok) {
       let msg = `server error (${res.status})`;
       try { const j = await res.json(); msg = j.detail || msg; } catch {}
-      alert("JnJ upload failed: " + msg);
       throw new Error(msg);
     }
     const data = await res.json();
@@ -915,13 +903,50 @@ function jnjRenderPreview() {
 function jnjPhotoThumbHtml(fname, isUnmatched = false) {
   const info = jnjState.photos.get(fname);
   if (!info) return "";
-  const cls = isUnmatched ? "jnj-photo-thumb unmatched" : "jnj-photo-thumb";
+  const selected = jnjSelectedPhoto === fname ? " selected" : "";
+  const cls = (isUnmatched ? "jnj-photo-thumb unmatched" : "jnj-photo-thumb") + selected;
   const tagBadge = info.tag_read ? ` title="Tag: ${escapeAttr(info.tag_read)}"` : (info.description_read ? ` title="${escapeAttr(info.description_read)}"` : "");
   return `<div class="${cls}" data-filename="${escapeAttr(fname)}"${tagBadge}>
     <img src="${info.thumb}" alt="" />
     <button class="jnj-photo-remove" title="Remove">×</button>
   </div>`;
 }
+
+// Mobile tap-to-assign: tap a photo to select it, tap an item card to assign.
+let jnjSelectedPhoto = null;
+document.addEventListener("click", (e) => {
+  if (!jnjState) return;
+  // Ignore remove-button clicks — they have their own handler
+  if (e.target.closest(".jnj-photo-remove")) return;
+  // Ignore any actual button/link/input clicks
+  if (e.target.closest("button, a, input, textarea, select, label")) return;
+
+  const thumb = e.target.closest(".jnj-photo-thumb");
+  const itemCard = e.target.closest(".jnj-item-card");
+
+  if (thumb) {
+    // Tap a photo -> select it (or unselect if already selected)
+    const fname = thumb.dataset.filename;
+    jnjSelectedPhoto = (jnjSelectedPhoto === fname) ? null : fname;
+    if (jnjSelectedPhoto) {
+      toast(`Selected photo. Now tap an item to assign it (or the Unmatched area to unassign).`);
+    }
+    jnjRenderPreview();
+  } else if (itemCard && jnjSelectedPhoto) {
+    // Tap an item card with a selected photo -> assign
+    const itemNum = itemCard.dataset.itemNum;
+    if (itemNum) {
+      jnjMovePhotoTo(jnjSelectedPhoto, itemNum);
+      toast(`Assigned to ${itemNum}.`);
+      jnjSelectedPhoto = null;
+    }
+  } else if (jnjSelectedPhoto && e.target.closest("#jnjUnmatched")) {
+    // Tap unmatched area with a selected photo -> unassign
+    jnjMovePhotoTo(jnjSelectedPhoto, null);
+    toast("Moved back to unmatched.");
+    jnjSelectedPhoto = null;
+  }
+});
 
 function jnjMovePhotoTo(fname, targetItemNum) {
   if (!jnjState) return;
