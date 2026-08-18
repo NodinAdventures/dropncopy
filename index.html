@@ -81,9 +81,9 @@
           <div class="drop-box-title">JnJ Sale Builder</div>
           <div class="drop-box-sub">Sheet + photos → import-ready zip</div>
         </div>
-        <div id="jnjDropZone" class="dropzone dropzone-jnj" tabindex="0" role="button" aria-label="Drop sheet and photos for JnJ Sale Builder">
-          <input id="jnjFileInput" type="file" multiple hidden accept=".pdf,image/*" />
-          <div class="dropzone-inner">
+        <label id="jnjDropZone" class="dropzone dropzone-jnj" for="jnjFileInput" aria-label="Drop sheet and photos for JnJ Sale Builder" style="display:block;position:relative;">
+          <input id="jnjFileInput" type="file" multiple accept=".pdf,image/*" style="position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer;z-index:2;" />
+          <div class="dropzone-inner" style="pointer-events:none;">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <rect x="3" y="3" width="7" height="7" rx="1" />
               <rect x="14" y="3" width="7" height="7" rx="1" />
@@ -91,9 +91,9 @@
               <rect x="14" y="14" width="7" height="7" rx="1" />
             </svg>
             <div class="dropzone-title">Drop sheet + photos here</div>
-            <div class="dropzone-sub">or <span class="link">click to browse</span> · one PDF/image sheet + item photos</div>
+            <div class="dropzone-sub">or <span class="link">tap to browse</span> · one PDF/image sheet + item photos</div>
           </div>
-        </div>
+        </label>
       </div>
 
       <!-- Processing tray (shared) -->

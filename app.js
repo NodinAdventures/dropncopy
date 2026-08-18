@@ -697,44 +697,9 @@ function jnjSavePrefs() {
   });
 }
 
-// Wire up the dropzone.
-// NOTE: iOS Safari sometimes fails to open the picker when a programmatic
-// .click() is dispatched on a hidden file input with an accept attribute.
-// Fix: make the file input an invisible-but-real overlay on top of the
-// dropzone so the user tap lands directly on the input itself (a genuine
-// user gesture, no programmatic click needed). Desktop drag/drop still
-// works because the input has pointer-events:none for drag events via CSS.
-// The old dropZone (existing feature) doesn't have this issue because it
-// has no accept attribute.
-
-// Give the file input inline styles that make it a full-size, transparent
-// overlay over the dropzone. Done in JS so we don't have to edit style.css.
-Object.assign(jnjFileInput.style, {
-  position: "absolute",
-  top: "0",
-  left: "0",
-  width: "100%",
-  height: "100%",
-  opacity: "0",
-  cursor: "pointer",
-  zIndex: "2",
-});
-jnjFileInput.removeAttribute("hidden");
-// Make sure the dropzone can position the input absolutely inside it
-jnjDropZone.style.position = "relative";
-// Make sure child elements (the icon, text) don't block the input taps
-const innerEl = jnjDropZone.querySelector(".dropzone-inner");
-if (innerEl) innerEl.style.pointerEvents = "none";
-
-// Keep the keyboard accessibility (Enter/Space) working
-jnjDropZone.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" || e.key === " ") { e.preventDefault(); jnjFileInput.click(); }
-});
-// Desktop click fallback (only fires if the tap missed the input somehow)
-jnjDropZone.addEventListener("click", (e) => {
-  if (e.target === jnjFileInput) return;
-  jnjFileInput.click();
-});
+// The dropzone is now a native <label for="jnjFileInput"> which opens the
+// file picker natively on all platforms including iOS Safari. No JS click
+// handler needed. We only wire up the change and drag/drop events here.
 jnjFileInput.addEventListener("change", (e) => {
   jnjHandleFiles(Array.from(e.target.files));
   jnjFileInput.value = "";
