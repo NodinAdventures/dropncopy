@@ -700,8 +700,13 @@ function jnjSavePrefs() {
 // The dropzone is now a native <label for="jnjFileInput"> which opens the
 // file picker natively on all platforms including iOS Safari. No JS click
 // handler needed. We only wire up the change and drag/drop events here.
+// DIAGNOSTIC: use alert() for visibility on mobile until we're sure the
+// pipeline works. Remove/replace once confirmed.
 jnjFileInput.addEventListener("change", (e) => {
-  jnjHandleFiles(Array.from(e.target.files));
+  const picked = Array.from(e.target.files || []);
+  // Big visible confirmation that the change event fired at all.
+  alert("JnJ: got " + picked.length + " file(s). Starting upload...");
+  jnjHandleFiles(picked);
   jnjFileInput.value = "";
 });
 
@@ -747,10 +752,17 @@ async function jnjHandleFiles(files) {
   try {
     const fd = new FormData();
     for (const f of files) fd.append("files", f);
-    const res = await fetch(JNJ_BUILD_URL, { method: "POST", body: fd });
+    let res;
+    try {
+      res = await fetch(JNJ_BUILD_URL, { method: "POST", body: fd });
+    } catch (netErr) {
+      alert("JnJ upload failed: network error — " + (netErr && netErr.message ? netErr.message : "unknown"));
+      throw netErr;
+    }
     if (!res.ok) {
       let msg = `server error (${res.status})`;
       try { const j = await res.json(); msg = j.detail || msg; } catch {}
+      alert("JnJ upload failed: " + msg);
       throw new Error(msg);
     }
     const data = await res.json();
