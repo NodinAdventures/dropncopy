@@ -91,8 +91,15 @@ There is NO character limit on the line. Include EVERY note the seller wrote for
 Read the item number on the sheet exactly as it is written. Include any letter prefix or suffix that is actually part of the number (like G6182, F1234, 10686FV).
 If the number is 6182, output 6182. If the number is G6182, output G6182. Do not add or remove letters.
 
-=== LOT NUMBERS (VERY IMPORTANT — KEEP THEM) ===
-After the item number, sheets have a LOT NUMBER in a separate column labeled "OFFICE USE ONLY" or similar. This looks like "18A", "17B", "21C", "F", "Z", "P", or a letter+digit like "Z 1", "P 3".
+=== LOT NUMBERS (VERY IMPORTANT — KEEP THEM SEPARATE FROM THE ITEM NUMBER) ===
+After the item number, sheets have a LOT NUMBER in a separate column labeled "OFFICE USE ONLY" or similar. This looks like "18A", "17B", "21C", "F", "Z", "P", "15C", "9B", "2046", "204B", or a letter+digit like "Z 1", "P 3".
+
+CRITICAL RULE: The item number and the lot number are in TWO SEPARATE COLUMNS on the sheet. They must appear as TWO SEPARATE TOKENS in the output, with a SINGLE SPACE between them. NEVER glue them together into one token.
+
+Wrong: "79428A KITCHENAID MIXER"   (glued — this breaks the CSV)
+Right: "7942 18A KITCHENAID MIXER"  (separated by a space)
+
+Even if the lot number is written tight against the item number on the sheet, or is circled and touches the item column, you must output them with a space between.
 
 THESE ARE REQUIRED and must appear in the output IMMEDIATELY AFTER the item number, separated by a single space, and BEFORE the description.
 
@@ -234,6 +241,47 @@ async def transcribe_image(image_bytes: bytes, media_type: str) -> str:
     )
     raw = (resp.choices[0].message.content or "").strip()
     return sanitize_transcript(raw)
+
+
+async def is_intake_sheet(image_bytes: bytes, media_type: str) -> bool:
+    """Ask the AI whether an image is a JnJ intake sheet (grid of item#/description
+    rows) vs. a photo of a physical item. Returns True only for a clear yes.
+    Used when no PDF was uploaded and we need to pick which image is the sheet.
+    """
+    b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
+    data_url = f"data:{media_type};base64,{b64}"
+    try:
+        resp = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            max_tokens=10,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": data_url, "detail": "low"},
+                        },
+                        {
+                            "type": "text",
+                            "text": (
+                                "Is this a paper intake sheet with a grid of "
+                                "handwritten rows (item numbers and item "
+                                "descriptions)? A sheet has printed headers "
+                                "like SELLERS NAME, LOT, DESCRIPTION, or "
+                                "OFFICE USE ONLY and multiple rows of writing. "
+                                "A photo of a single physical item is NOT a "
+                                "sheet. Answer only YES or NO."
+                            ),
+                        },
+                    ],
+                },
+            ],
+        )
+        answer = (resp.choices[0].message.content or "").strip().upper()
+        return answer.startswith("YES")
+    except Exception:
+        return False
 
 
 # ---- Post-processing safety net ----
@@ -560,13 +608,16 @@ JNJ_CSV_COLUMNS = [
     "cf_SellerID",
 ]
 
-# Default field values matching JnJ's sample CSV.
+# Default field values matching JnJ's sample CSV (April 16 Q Sale).
+# Reference: uploaded sample 1-2.csv row 2:
+#   FREMONT,APRIL 16 ~ Q SALE ,AUCTION,7936AS TALL FREESTANDING JEWLERY BOX,
+#   TALL FREESTANDING JEWLERY BOX,|UNITED STATES|MICHIGAN|,49412,,,,$1.00 ,,,,,,10,,6,...
 JNJ_DEFAULTS = {
     "Seller": "FREMONT",
     "ListingFormat": "AUCTION",
     "ItemLocation": "|UNITED STATES|MICHIGAN|",
     "ZipCode": "49412",
-    "Price": "$1.00 ",
+    "StartBid": "$1.00 ",
     "BuyersPremiumPct": "10",
     "TaxPercent": "6",
 }
@@ -598,18 +649,21 @@ def parse_item_lines(transcript: str) -> List[Tuple[str, str, str]]:
         if len(parts) < 2:
             continue
         item_num = parts[0]
-        # Check if parts[1] is a lot code (1-2 digits + letter, or single letter,
-        # or letter+digits like Z3, P16).
+        # Check if parts[1] is a lot code from the OFFICE USE ONLY column.
+        # Real JnJ lot codes observed in intake sheets:
+        #   Letter+digit:  18A, 17B, 21C, 204B, 15C, 9B, 51E, 79B, 60C
+        #   Single letter: F, K, Z, O, P
+        #   Letter+digits: Z3, P16
+        #   Pure digits:   2046, 730, 2010, 200 (yes — also lot codes on some sheets)
+        # A lot code is short (1-5 chars) of just A-Z / 0-9. Descriptions almost always
+        # start with a common English word (ROCKER, DRESSER, KITCHENAID, etc.) which
+        # doesn't match this pattern, so short alphanumeric tokens right after the
+        # item number are safe to treat as lot codes.
         rest = parts[1:]
         lot_code = ""
         if rest:
             tok = rest[0]
-            # A lot code is short (2-5 chars) and MUST contain at least one letter.
-            # This matches JnJ's real format: 18A, 17B, 21C, 204B, 20LA, 73C, F, K,
-            # Z, O, Z3, P16, 15C, 9B. Pure-digit tokens like "2046" are NOT lot codes
-            # (they're either quantities or a seller's internal code that stays in
-            # the description).
-            if 1 <= len(tok) <= 5 and any(c.isalpha() for c in tok) and re.fullmatch(r'[A-Z0-9]+', tok):
+            if 1 <= len(tok) <= 5 and re.fullmatch(r'[A-Z0-9]+', tok):
                 lot_code = tok
                 rest = rest[1:]
         description = " ".join(rest).strip()
@@ -624,26 +678,48 @@ def build_jnj_csv_row(item_num: str, lot_code: str, description: str,
     """
     Build one row of the JnJ CSV.
 
-    Title format matches the JnJ sample: [item#][lot_code] [DESCRIPTION]
-    Example: '7936AS TALL FREESTANDING JEWLERY BOX'
-             '7942 2046 ROCKER' (space between if lot_code has digits)
+    Title format matches JnJ's real sample CSV:
+      '7936AS TALL FREESTANDING JEWLERY BOX'   (no lot code -> AS)
+      '7937AS WINCHESTER 12 GUN GUN SAFE'      (no lot code -> AS)
+      '7938A15C HAMMS BEER SIGN'               (lot code 15C -> A15C)
+      '7939A9B HOMEDICS FOOT MASSAGER NEW'     (lot code 9B  -> A9B)
 
-    Looking at sample titles: '7936AS', '7937AS', '7938A15C', '7939A9B'
-    the lot code is concatenated to item# with NO space, then a space, then desc.
-    So we do: title = f"{item_num}{lot_code} {description}"
+    Pattern: {item_num}A{lot_code} {DESCRIPTION}
+    When no lot code:   {item_num}AS {DESCRIPTION}
+
+    Title is capped at 60 characters per JnJ's spec (Admin CSV Help column D).
 
     Description column = just the plain description (no item# or lot code).
 
-    cf_SellerID = seller_id + zero-padded sequence (AA1000, AA1001, ...)
+    cf_SellerID = the seller's ID from the sheet header (e.g. 'AA1961').
+    All rows on one intake sheet share the same seller ID.
     """
-    title = f"{item_num}{lot_code} {description}" if lot_code else f"{item_num} {description}"
+    if lot_code:
+        title = f"{item_num}A{lot_code} {description}"
+    else:
+        title = f"{item_num}AS {description}"
+    # Enforce Title max 60 chars per JnJ spec
+    if len(title) > 60:
+        title = title[:60].rstrip()
+
     row = {col: "" for col in JNJ_CSV_COLUMNS}
     row.update(JNJ_DEFAULTS)
     row["Category"] = sale_name
     row["Title"] = title
     row["Description"] = description
-    # cf_SellerID like "AA1000", "AA1001", ... starting from seller_seq
-    row["cf_SellerID"] = f"{seller_id}{seller_seq}" if seller_id else ""
+    # StartBid must have a value for auction listing format
+    row["StartBid"] = "$1.00 "
+    # cf_SellerID: use seller_id directly (all rows on one sheet share it).
+    # For backward compat, if seller_seq differs from seller_id's own trailing digits
+    # (i.e. caller passed a plain prefix + sequence), fall back to old behavior.
+    if seller_id and any(c.isdigit() for c in seller_id):
+        # seller_id already has digits (like 'AA1961') -> use as-is for all rows
+        row["cf_SellerID"] = seller_id
+    elif seller_id:
+        # seller_id is a prefix only (like 'AA') -> append the sequence
+        row["cf_SellerID"] = f"{seller_id}{seller_seq}"
+    else:
+        row["cf_SellerID"] = ""
     return row
 
 
@@ -874,9 +950,14 @@ async def jnj_build(files: List[UploadFile] = File(...)):
     # Separate the sheet from the photos.
     sheet: Optional[UploadFile] = None
     photos: List[UploadFile] = []
-    # First pass: PDF is always the sheet.
+    # First pass: any PDF file is the sheet. Check BOTH filename extension AND
+    # content-type, because iOS Safari sometimes uploads PDFs with mangled
+    # filenames (no .pdf extension) but the correct application/pdf mime type.
     for f in files:
-        if (f.filename or "").lower().endswith(".pdf") and sheet is None:
+        name = (f.filename or "").lower()
+        ctype = (f.content_type or "").lower()
+        is_pdf = name.endswith(".pdf") or ctype == "application/pdf"
+        if is_pdf and sheet is None:
             sheet = f
         else:
             photos.append(f)
@@ -887,20 +968,28 @@ async def jnj_build(files: List[UploadFile] = File(...)):
             if any(hint in n for hint in ["sheet", "intake", "file "]) or n.startswith("file"):
                 sheet = photos.pop(i)
                 break
-    # Third pass: use the LARGEST file as the sheet (intake photos are usually higher-res than item shots)
+    # Third pass: AI-detects which image is the sheet by looking at each one
+    # briefly. The intake sheet has "SELLERS NAME", "LOT DESCRIPTION", or
+    # "OFFICE USE ONLY" printed as headers, so it's easy to identify.
+    # This replaces the old "largest file = sheet" heuristic which was wrong
+    # (item photos from iPhones are 2-4 MB, single-page sheet PDFs are ~200 KB).
     if sheet is None and photos:
-        # Read all sizes
-        sized = []
-        for f in photos:
+        for i, f in enumerate(photos):
             data = await f.read()
             await f.seek(0)
-            sized.append((len(data), f))
-        sized.sort(key=lambda x: -x[0])
-        sheet = sized[0][1]
-        photos = [f for _, f in sized[1:]]
+            media_type = f.content_type or "image/jpeg"
+            if not media_type.startswith("image/"):
+                media_type = "image/jpeg"
+            try:
+                is_sheet = await is_intake_sheet(data, media_type)
+            except Exception:
+                is_sheet = False
+            if is_sheet:
+                sheet = photos.pop(i)
+                break
 
     if sheet is None:
-        raise HTTPException(400, "Couldn't identify a sheet in the upload.")
+        raise HTTPException(400, "Couldn't identify a sheet in the upload. Please include the intake sheet as a PDF or a clear photo of the whole page.")
 
     # 1) Transcribe the sheet
     transcript = await transcribe_uploaded_sheet(sheet)
@@ -1047,18 +1136,18 @@ async def jnj_zip(
             item_num, lot_code, description,
             sale_name, seller_id, seller_start + idx,
         )
-        # Enforce Title max 60 chars per JnJ spec
-        if len(row.get("Title", "")) > 60:
-            row["Title"] = row["Title"][:60].rstrip()
+        # Title cap is enforced inside build_jnj_csv_row.
 
-        # Rename photos for this item: <sellerid>_<itemnum>_001.<ext>
+        # Rename photos for this item using the same code that becomes the Title
+        # prefix: {item_num}A{lot_code} or {item_num}AS. This keeps photo names
+        # aligned with the CSV Title so JnJ staff can trace them.
+        item_code = f"{item_num}A{lot_code}" if lot_code else f"{item_num}AS"
         item_photos = photos_by_item.get(item_num, [])
         for photo_idx, p in enumerate(item_photos[:20], start=1):
             ext = (p.filename or "photo.jpg").rsplit(".", 1)[-1].lower()
             if ext not in ("jpg", "jpeg", "png", "webp", "gif", "bmp", "heic"):
                 ext = "jpg"
-            seller_full = f"{seller_id}{seller_start + idx}" if seller_id else f"item{seller_start + idx}"
-            new_name = f"{seller_full}_{item_num}_{photo_idx:03d}.{ext}"
+            new_name = f"{item_code}_{photo_idx:03d}.{ext}"
             data = await p.read()
             # Reset the file position so we don't consume it if it's used again
             await p.seek(0)
