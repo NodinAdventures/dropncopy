@@ -947,6 +947,19 @@ async def jnj_build(files: List[UploadFile] = File(...)):
     if not files:
         raise HTTPException(400, "No files uploaded.")
 
+    try:
+        return await _jnj_build_inner(files)
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print(f"JNJ-BUILD FATAL ERROR: {e}\n{tb}", flush=True)
+        # Return the actual error to the client so it's visible on mobile.
+        raise HTTPException(500, f"{type(e).__name__}: {str(e)[:400]}")
+
+
+async def _jnj_build_inner(files: List[UploadFile]) -> JSONResponse:
     # Separate the sheet from the photos.
     sheet: Optional[UploadFile] = None
     photos: List[UploadFile] = []
@@ -1059,6 +1072,18 @@ async def jnj_build(files: List[UploadFile] = File(...)):
         "transcript": transcript,
         "items": items,
         "photos": photo_infos,
+    })
+
+
+@app.get("/api/jnj-diag")
+async def jnj_diag():
+    """Quick health check to verify the JnJ endpoint is reachable and the
+    OpenAI key is loaded. Returns 200 if all is well."""
+    import os, sys as _sys
+    return JSONResponse({
+        "ok": True,
+        "has_openai_key": bool(os.environ.get("OPENAI_API_KEY")),
+        "python_version": _sys.version.split()[0],
     })
 
 

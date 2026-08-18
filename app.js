@@ -750,10 +750,22 @@ async function jnjHandleFiles(files) {
     const res = await fetch(JNJ_BUILD_URL, { method: "POST", body: fd });
     if (!res.ok) {
       let msg = `server error (${res.status})`;
-      try { const j = await res.json(); msg = j.detail || msg; } catch {}
+      let bodyText = "";
+      try {
+        bodyText = await res.text();
+        try { const j = JSON.parse(bodyText); msg = j.detail || j.error || msg; }
+        catch { if (bodyText) msg = bodyText.slice(0, 500); }
+      } catch {}
+      console.error("JnJ build failed:", res.status, bodyText);
       throw new Error(msg);
     }
-    const data = await res.json();
+    let data;
+    try {
+      data = await res.json();
+    } catch (parseErr) {
+      console.error("JnJ build: server returned non-JSON", parseErr);
+      throw new Error("Server returned an invalid response. Check the logs on Render.");
+    }
     statusEl.textContent = `done — ${data.items.length} items, ${data.photos.length} photos`;
     li.querySelector(".spinner").outerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color: var(--success); flex-shrink:0;"><polyline points="20 6 9 17 4 12"/></svg>`;
     setTimeout(() => { processingList.innerHTML = ""; processingTray.classList.add("hidden"); }, 2500);
@@ -790,12 +802,32 @@ async function jnjHandleFiles(files) {
     jnjState = { items: data.items, photos: photoMap, itemPhotos, unmatched };
     jnjRenderPreview();
   } catch (err) {
-    console.error(err);
+    console.error("JnJ build error:", err);
     statusEl.textContent = err.message || "failed";
     li.classList.add("error");
     li.querySelector(".spinner").outerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color: var(--danger); flex-shrink:0;"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>`;
-    setTimeout(() => { processingList.innerHTML = ""; processingTray.classList.add("hidden"); }, 5000);
+    // DO NOT auto-hide errors — user needs to see what went wrong.
+    // Also show a big persistent banner so it can't be missed on mobile.
+    jnjShowErrorBanner(err.message || "Something went wrong. Please try again.");
   }
+}
+
+// Persistent error banner — stays until user dismisses it.
+function jnjShowErrorBanner(msg) {
+  let banner = document.getElementById("jnjErrorBanner");
+  if (!banner) {
+    banner = document.createElement("div");
+    banner.id = "jnjErrorBanner";
+    banner.style.cssText = "position:fixed;top:12px;left:12px;right:12px;z-index:9999;background:#3b1414;border:1px solid #ff5252;color:#fff;padding:14px 44px 14px 16px;border-radius:12px;font-size:14px;line-height:1.4;box-shadow:0 8px 24px rgba(0,0,0,0.4);";
+    document.body.appendChild(banner);
+  }
+  banner.innerHTML = `
+    <div style="font-weight:600;margin-bottom:4px;">JnJ Sale Builder — error</div>
+    <div id="jnjErrorBannerMsg" style="font-size:13px;opacity:0.95;word-break:break-word;"></div>
+    <button type="button" aria-label="Dismiss" style="position:absolute;top:8px;right:8px;background:transparent;border:none;color:#fff;font-size:22px;line-height:1;cursor:pointer;padding:4px 10px;">×</button>
+  `;
+  banner.querySelector("#jnjErrorBannerMsg").textContent = msg;
+  banner.querySelector("button").onclick = () => banner.remove();
 }
 
 function jnjRenderPreview() {
