@@ -806,22 +806,28 @@ Response format (no tag):
   wooden rocking chair
 """
 
-async def read_photo_tag(image_bytes: bytes, media_type: str) -> Dict[str, str]:
+async def read_photo_tag(image_bytes: bytes, media_type: str, pre_shrunk: bool = False) -> Dict[str, str]:
     """Ask the vision model to read an item-number tag or fall back to a description.
+
+    If pre_shrunk=True, image_bytes are already <=1024px JPEG and we skip the
+    PIL decode step (saves ~30MB of RAM per call — crucial on Render Free tier).
 
     Returns:
       {'tag': 'G6182'}                        - if a tag was read
       {'tag': '', 'description': 'rocker'}     - if no tag but got description
     """
     try:
-        # Downscale big photos to keep API calls fast and cheap. Vision handles
-        # 1024px just fine for reading item tags.
-        img = Image.open(io.BytesIO(image_bytes))
-        img = img.convert("RGB")
-        img.thumbnail((1024, 1024))
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=85)
-        small_bytes = buf.getvalue()
+        if pre_shrunk:
+            small_bytes = image_bytes
+        else:
+            # Downscale big photos to keep API calls fast and cheap. Vision handles
+            # 1024px just fine for reading item tags.
+            with Image.open(io.BytesIO(image_bytes)) as img:
+                img = img.convert("RGB")
+                img.thumbnail((1024, 1024))
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=85)
+                small_bytes = buf.getvalue()
         b64 = base64.standard_b64encode(small_bytes).decode("utf-8")
         data_url = f"data:image/jpeg;base64,{b64}"
 
@@ -1111,31 +1117,71 @@ async def jnj_match_photos(
         if not isinstance(items, list) or not items:
             raise HTTPException(400, "items_json must be a non-empty list.")
 
+        # Memory-safe photo processing for Render Free tier (512MB limit).
+        # Strategy: shrink each photo ONCE to a small JPEG, free the original
+        # bytes and PIL bitmap immediately, then use the shrunk bytes for both
+        # the thumbnail and the AI tag read. Process photos sequentially (not
+        # via gather) so peak RAM stays bounded by ~2 photos in flight rather
+        # than all N at once.
+        import gc
+
         async def process_photo(idx: int, photo: UploadFile) -> Dict:
             raw = await photo.read()
-            try:
-                img = Image.open(io.BytesIO(raw))
-                img = img.convert("RGB")
-                img.thumbnail((200, 200))
-                tbuf = io.BytesIO()
-                img.save(tbuf, format="JPEG", quality=75)
-                thumb_b64 = base64.standard_b64encode(tbuf.getvalue()).decode("utf-8")
-                thumb_data_url = f"data:image/jpeg;base64,{thumb_b64}"
-            except Exception:
-                thumb_data_url = ""
+            filename = photo.filename or f"photo_{idx}.jpg"
             media_type = photo.content_type or "image/jpeg"
             if not media_type.startswith("image/"):
                 media_type = "image/jpeg"
-            read = await read_photo_tag(raw, media_type)
+
+            # Shrink to 1024px (used for AI) and 200px (used for UI thumb) in
+            # one PIL open. Free the big bitmap ASAP by using a `with` block.
+            small_bytes = b""
+            thumb_data_url = ""
+            try:
+                with Image.open(io.BytesIO(raw)) as img:
+                    rgb = img.convert("RGB")
+                    # 1) 1024px JPEG for vision API
+                    big = rgb.copy()
+                    big.thumbnail((1024, 1024))
+                    bbuf = io.BytesIO()
+                    big.save(bbuf, format="JPEG", quality=85)
+                    small_bytes = bbuf.getvalue()
+                    big.close()
+                    del big, bbuf
+                    # 2) 200px thumb for the UI
+                    tbuf = io.BytesIO()
+                    rgb.thumbnail((200, 200))
+                    rgb.save(tbuf, format="JPEG", quality=75)
+                    thumb_b64 = base64.standard_b64encode(tbuf.getvalue()).decode("utf-8")
+                    thumb_data_url = f"data:image/jpeg;base64,{thumb_b64}"
+                    rgb.close()
+                    del rgb, tbuf, thumb_b64
+            except Exception as e:
+                print(f"process_photo shrink failed for {filename}: {e}", flush=True)
+
+            # Free the original big bytes NOW — don't hold them across the
+            # OpenAI call (which takes 3–10s).
+            del raw
+            gc.collect()
+
+            read = await read_photo_tag(small_bytes, "image/jpeg", pre_shrunk=True)
+            del small_bytes
+            gc.collect()
+
             return {
                 "id": f"p{idx}",
-                "filename": photo.filename or f"photo_{idx}.jpg",
+                "filename": filename,
                 "thumb_data_url": thumb_data_url,
                 "tag_read": read.get("tag", ""),
                 "description_read": read.get("description", ""),
             }
 
-        photo_infos = await asyncio.gather(*[process_photo(i, p) for i, p in enumerate(photos)])
+        # Process sequentially to keep peak memory low. On Render Free
+        # (512MB), running 6 phone photos through asyncio.gather peaks around
+        # 400MB — too close to the OOM cliff. Sequential adds ~5–10s to a batch
+        # but avoids 502s from the worker being killed.
+        photo_infos: List[Dict] = []
+        for i, p in enumerate(photos):
+            photo_infos.append(await process_photo(i, p))
         valid_items = {i["item_num"] for i in items}
 
         for p in photo_infos:

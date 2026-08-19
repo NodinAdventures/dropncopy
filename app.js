@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-19-split-flow-and-folder-v4";
+const BUILD_ID = "2026-08-19-memory-safe-v5";
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -34,8 +34,10 @@ const JNJ_BUILD_SHEET_URL = "__PORT_5000__".startsWith("__")
 const JNJ_MATCH_PHOTOS_URL = "__PORT_5000__".startsWith("__")
   ? "/api/jnj-match-photos"
   : "__PORT_5000__/api/jnj-match-photos";
-// Batch size: keep each photo POST under Render's ~30s proxy timeout.
-const JNJ_PHOTO_BATCH_SIZE = 6;
+// Batch size: keep each photo POST under Render's ~30s proxy timeout AND
+// under the 512MB RAM cap on Free tier. 3 photos = ~15–20s per batch,
+// well within limits.
+const JNJ_PHOTO_BATCH_SIZE = 3;
 const JNJ_REMATCH_URL = "__PORT_5000__".startsWith("__")
   ? "/api/jnj-rematch"
   : "__PORT_5000__/api/jnj-rematch";
@@ -964,14 +966,58 @@ try {
   }
 } catch {}
 
-// POST wrapper that returns parsed JSON, throws a clean Error on non-2xx.
-async function postForJson(url, formData, contextLabel) {
+// Health-check URL for warming up the free-tier server before doing real work.
+const JNJ_HEALTH_URL = "__PORT_5000__".startsWith("__")
+  ? "/api/health"
+  : "__PORT_5000__/api/health";
+
+// Wake up the Render Free-tier server before hitting a real endpoint. The
+// server spins down after ~15 min of inactivity and takes up to 50s to come
+// back — without this, the first Build after a long idle will 502.
+async function jnjWarmupServer(statusEl) {
+  const started = Date.now();
+  let lastErr = null;
+  for (let attempt = 1; attempt <= 6; attempt++) {
+    try {
+      const res = await fetch(JNJ_HEALTH_URL, { method: "GET" });
+      if (res.ok) {
+        const elapsed = Math.round((Date.now() - started) / 1000);
+        if (elapsed > 3 && statusEl) statusEl.textContent = `server woke up in ${elapsed}s…`;
+        return;
+      }
+    } catch (e) { lastErr = e; }
+    if (statusEl) statusEl.textContent = `waking up server… (${attempt}/6, this can take up to a minute after idle)`;
+    await new Promise(r => setTimeout(r, 8000));
+  }
+  // Non-fatal — the real call may still work.
+  console.warn("warmup exceeded 6 tries:", lastErr);
+}
+
+// POST wrapper with a single retry on transient failure (502/504/network).
+async function postForJson(url, formData, contextLabel, { retry = true } = {}) {
+  const doFetch = async () => fetch(url, { method: "POST", body: formData });
   let res;
   try {
-    res = await fetch(url, { method: "POST", body: formData });
+    res = await doFetch();
   } catch (netErr) {
-    // "Failed to fetch" — usually a proxy timeout (502) or network drop.
-    throw new Error(`${contextLabel}: network error (${netErr.message || "connection lost"}). This usually means the server took too long. Try again — photos are processed in batches so a retry only redoes the failed batch.`);
+    if (retry) {
+      console.warn(`${contextLabel}: retrying after network error —`, netErr.message);
+      await new Promise(r => setTimeout(r, 4000));
+      try { res = await doFetch(); }
+      catch (retryErr) {
+        throw new Error(`${contextLabel}: network error (${retryErr.message || "connection lost"}). The server may be waking up — try clicking Build again.`);
+      }
+    } else {
+      throw new Error(`${contextLabel}: network error (${netErr.message || "connection lost"}).`);
+    }
+  }
+  // Auto-retry on 502/503/504 (server waking up or transient proxy issue).
+  if (retry && (res.status === 502 || res.status === 503 || res.status === 504)) {
+    console.warn(`${contextLabel}: got ${res.status}, retrying in 5s…`);
+    await new Promise(r => setTimeout(r, 5000));
+    try { res = await doFetch(); } catch (e) {
+      throw new Error(`${contextLabel}: server error (${res.status}) then network error on retry (${e.message}).`);
+    }
   }
   if (!res.ok) {
     let msg = `${contextLabel}: server error (${res.status})`;
@@ -1040,6 +1086,12 @@ async function jnjHandleFiles(files) {
   const statusEl = li.querySelector(".status");
 
   try {
+    // ---------- Step 0: wake up the server if it's cold ----------
+    // Render Free tier sleeps after 15 min idle. First real request can take
+    // up to 50s to wake it. Ping /api/health first so the real call is fast.
+    statusEl.textContent = "checking server…";
+    await jnjWarmupServer(statusEl);
+
     // ---------- Step 1: transcribe the sheet ----------
     statusEl.textContent = "reading sheet…";
     const sheetFd = new FormData();
