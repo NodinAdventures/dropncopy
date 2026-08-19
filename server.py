@@ -1158,37 +1158,67 @@ async def jnj_match_photos(
             raw = await photo.read()
             filename = photo.filename or f"photo_{idx}.jpg"
 
-            # v15: Dave shoots ITEM → BLANK/BLACK PHOTO → next item. Blank photos
-            # are hard delimiters between items. No AI, no dhash, no guessing.
-            # We just need to detect "blank" (all dark OR all light with no
-            # detail) and use that as a break marker.
+            # v16: Dave shoots ITEM → BLANK/NO-SUBJECT PHOTO → next item.
+            # "Blank" per user = ANY photo with no auction item in frame:
+            #   • all black (lens cap, dark ceiling)
+            #   • all white / washed-out
+            #   • all skin (finger over lens, thumb, hand)
+            #   • all floor / carpet / wall / grass
+            # Unifying property: uniform surface, no distinct subject edges.
+            # A real item has edges (product outlines, shadows, hard corners).
+            # A hand/floor/wall does NOT — it's smooth across the whole frame.
+            #
+            # Detection strategy: compute edge density on a downsampled version.
+            # Sobel-lite: sum |neighbor pixel differences|. High = real subject,
+            # low = uniform surface regardless of color.
             thumb_data_url = ""
             is_blank = False
             try:
                 with Image.open(io.BytesIO(raw)) as img:
                     rgb = img.convert("RGB")
-                    # Downsample to a tiny image for blank detection —
-                    # a 32x32 grayscale has enough info to know if a photo is
-                    # "nothing" vs a real subject.
+                    # 64x64 grayscale is enough to measure edge density without
+                    # being CPU-heavy (~4k pixels vs ~1M for the raw photo).
                     tiny = rgb.copy().convert("L")
-                    tiny.thumbnail((32, 32))
+                    tiny.thumbnail((64, 64))
+                    tw, th = tiny.size
                     px = list(tiny.getdata())
                     tiny.close()
-                    if px:
+                    if px and tw > 2 and th > 2:
+                        # Simple edge-density metric: for each pixel, average the
+                        # absolute difference vs its right and bottom neighbors.
+                        # Real items: edge_density typically 15-60.
+                        # Skin/floor/wall: edge_density typically 2-10.
+                        # Pure black/white: edge_density ~0-3.
+                        edge_sum = 0
+                        edge_count = 0
+                        for y in range(th - 1):
+                            row_start = y * tw
+                            next_row_start = (y + 1) * tw
+                            for x in range(tw - 1):
+                                p = px[row_start + x]
+                                dx = abs(px[row_start + x + 1] - p)
+                                dy = abs(px[next_row_start + x] - p)
+                                edge_sum += dx + dy
+                                edge_count += 2
+                        edge_density = edge_sum / edge_count if edge_count else 0
+
+                        # Also compute mean + std_dev as tie-breakers.
                         mean_lum = sum(px) / len(px)
-                        # Standard deviation — measures how much variation there
-                        # is in the image. A real photo has lots of variation.
-                        # A blank/black/washed-out photo has almost none.
                         variance = sum((v - mean_lum) ** 2 for v in px) / len(px)
                         std_dev = variance ** 0.5
-                        # Blank if: (all very dark AND low variation) OR
-                        #           (all very bright AND low variation) OR
-                        #           very low variation overall (blurry white/black)
-                        if std_dev < 12:  # essentially uniform image
+
+                        # BLANK if:
+                        #   1. Low edge density AND low overall variation
+                        #      (uniform surface — floor, wall, skin, sky, etc.)
+                        #   2. Pure black photo (mean very low, edges very low)
+                        #   3. Pure white photo (mean very high, edges very low)
+                        # Threshold 12 on edge_density catches skin/floor/wall
+                        # comfortably while leaving real items (≥15) safe.
+                        if edge_density < 12 and std_dev < 40:
                             is_blank = True
-                        elif mean_lum < 25 and std_dev < 20:  # black photo
+                        elif mean_lum < 30 and edge_density < 15:
                             is_blank = True
-                        elif mean_lum > 230 and std_dev < 20:  # washed-out white
+                        elif mean_lum > 225 and edge_density < 15:
                             is_blank = True
 
                     # 160px thumb for the UI (base64 in JSON — keep small)
