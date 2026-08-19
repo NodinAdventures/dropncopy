@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-19-scene-change-safe-v10";
+const BUILD_ID = "2026-08-19-folder-drop-fix-v11";
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -867,19 +867,47 @@ jnjBuildBtn.addEventListener("click", () => {
     jnjDropZone.classList.remove("drag-over");
   })
 );
+// Read ALL entries from a directory reader. Chrome returns ~100 per call,
+// so we have to keep calling readEntries() until it returns an empty array.
+// CRITICAL: the entry objects become invalid once the drop event handler
+// returns control to the browser, so we must aggressively read everything
+// before doing any other async work.
+function readAllEntries(reader) {
+  return new Promise((resolve, reject) => {
+    const all = [];
+    const readBatch = () => {
+      reader.readEntries(
+        (entries) => {
+          if (!entries.length) {
+            resolve(all);
+          } else {
+            all.push(...entries);
+            // Recurse immediately — no await between calls, no delay.
+            readBatch();
+          }
+        },
+        (err) => reject(err)
+      );
+    };
+    readBatch();
+  });
+}
+
 // Recursively walk a dropped folder via FileSystemEntry API.
+// Uses readAllEntries() to defeat the 100-per-batch limit.
 async function walkEntry(entry, out) {
   if (!entry) return;
   if (entry.isFile) {
     await new Promise((res) => entry.file((f) => { out.push(f); res(); }, () => res()));
   } else if (entry.isDirectory) {
     const reader = entry.createReader();
-    // readEntries returns in batches — keep reading until empty.
-    while (true) {
-      const batch = await new Promise((res) => reader.readEntries((ents) => res(ents), () => res([])));
-      if (!batch.length) break;
-      for (const child of batch) await walkEntry(child, out);
+    let entries;
+    try {
+      entries = await readAllEntries(reader);
+    } catch {
+      entries = [];
     }
+    for (const child of entries) await walkEntry(child, out);
   }
 }
 
@@ -887,18 +915,23 @@ jnjDropZone.addEventListener("drop", async (e) => {
   if (e.dataTransfer.types.includes("application/x-jnj-photo")) return;
 
   // Try FileSystemEntry path first — this expands dropped folders.
+  // IMPORTANT: grab all entries synchronously before any await, otherwise
+  // Chrome invalidates the DataTransferItem list.
   const items = e.dataTransfer.items ? Array.from(e.dataTransfer.items) : [];
-  const collected = [];
-  let usedEntryApi = false;
+  const entriesFirst = [];
+  const fallbackFiles = Array.from(e.dataTransfer.files || []);
   for (const it of items) {
     if (it.kind !== "file") continue;
     const entry = it.webkitGetAsEntry && it.webkitGetAsEntry();
-    if (entry) {
-      usedEntryApi = true;
-      await walkEntry(entry, collected);
-    }
+    if (entry) entriesFirst.push(entry);
   }
-  const files = usedEntryApi ? collected : Array.from(e.dataTransfer.files || []);
+
+  const collected = [];
+  const usedEntryApi = entriesFirst.length > 0;
+  for (const entry of entriesFirst) {
+    await walkEntry(entry, collected);
+  }
+  const files = usedEntryApi ? collected : fallbackFiles;
   if (!files.length) return;
 
   let droppedCount = 0;
@@ -916,9 +949,11 @@ jnjDropZone.addEventListener("drop", async (e) => {
     }
   }
   jnjRenderStaged();
-  if (droppedCount > 0) {
-    toast(`Skipped ${droppedCount} non-image or empty file${droppedCount === 1 ? "" : "s"}.`);
-  }
+  // Always confirm how many photos landed — makes silent losses obvious.
+  const total = files.length;
+  const staged = jnjStaged.photos.length;
+  const summary = `Received ${total} file${total === 1 ? "" : "s"}, staged ${staged} photo${staged === 1 ? "" : "s"}${droppedCount > 0 ? `, skipped ${droppedCount} non-image` : ""}.`;
+  toast(summary);
 });
 
 // Fallback legacy input — keep for anything still referencing jnjFileInput.
@@ -939,8 +974,8 @@ jnjFileInput.addEventListener("change", (e) => {
 // Initial render (disables Build until files staged)
 jnjRenderStaged();
 
-// Stamp the build ID into the footer so we can visually confirm the deploy
-// landed on the phone (no devtools needed).
+// Stamp the build ID as a floating badge so we can visually confirm the deploy
+// landed — both in the footer (small) AND as a corner badge (impossible to miss).
 try {
   const footer = document.querySelector(".app-footer");
   if (footer) {
@@ -949,6 +984,13 @@ try {
     stamp.textContent = `Build: ${BUILD_ID}`;
     footer.appendChild(stamp);
   }
+  // Also add a fixed-position badge in the bottom-right corner so it's
+  // visible from any part of the page without scrolling.
+  const badge = document.createElement("div");
+  badge.id = "buildIdBadge";
+  badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
+  badge.textContent = `v11 · ${BUILD_ID}`;
+  document.body.appendChild(badge);
 } catch {}
 
 // Health-check URL for warming up the free-tier server before doing real work.
