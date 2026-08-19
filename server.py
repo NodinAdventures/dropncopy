@@ -1194,7 +1194,12 @@ async def jnj_match_photos(
                 print(f"process_photo shrink failed for {filename}: {e}", flush=True)
 
             # Ask the AI: is there an auction item in this photo?
-            # We only need a yes/no. Keep prompt tight to minimize tokens.
+            # THREE possible answers now:
+            #   YES   = definitely an auction item (furniture, tool, etc.)
+            #   NO    = definitely no item (hand, floor, wall, black, sky, etc.)
+            #   MAYBE = ambiguous close-up of texture/metal/wood/fabric
+            # v19: 'maybe' photos wait for pass 2 (neighbor check).
+            first_pass = "yes"
             if ai_thumb_b64 and _OPENAI_KEY:
                 try:
                     resp = await client.chat.completions.create(
@@ -1203,13 +1208,11 @@ async def jnj_match_photos(
                             "role": "user",
                             "content": [
                                 {"type": "text", "text": (
-                                    "Does this photo contain a distinct auction item "
-                                    "(furniture, tool, collectible, appliance, décor, "
-                                    "vehicle, etc.)? Answer ONLY 'yes' or 'no'. "
-                                    "Answer 'no' if the photo shows: a hand/finger, a "
-                                    "floor/carpet/wall/ceiling/sky with no item, an "
-                                    "all-black or all-white frame, a blurry shot with "
-                                    "no identifiable subject, or an intentional divider photo."
+                                    "Classify this auction-sale photo. Reply with EXACTLY one word:\n\n"
+                                    "YES   - clearly contains an auction item (furniture, tool, collectible, appliance, vehicle, box of goods, etc.).\n"
+                                    "NO    - clearly contains NO item: a hand/finger over lens, a floor/carpet/wall/ceiling/sky with nothing else, an all-black or all-white frame, or a completely blurry shot.\n"
+                                    "MAYBE - ambiguous close-up of a texture, surface, part, or detail (metal, wood grain, fabric, wheel, drawer, hardware) that COULD be part of an item nearby but isn't identifiable on its own.\n\n"
+                                    "Answer only: YES, NO, or MAYBE."
                                 )},
                                 {"type": "image_url", "image_url": {
                                     "url": f"data:image/jpeg;base64,{ai_thumb_b64}",
@@ -1217,16 +1220,21 @@ async def jnj_match_photos(
                                 }},
                             ],
                         }],
-                        max_tokens=3,
+                        max_tokens=5,
                         temperature=0,
                     )
                     answer = (resp.choices[0].message.content or "").strip().lower()
-                    if answer.startswith("n"):
-                        is_blank = True
+                    if answer.startswith("m"):
+                        first_pass = "maybe"
+                    elif answer.startswith("n"):
+                        first_pass = "no"
                 except Exception as e:
                     print(f"has-item check failed for {filename}: {type(e).__name__}: {e}", flush=True)
 
-            del ai_thumb_b64
+            if first_pass == "no":
+                is_blank = True
+            # NOTE: we intentionally KEEP ai_thumb_b64 around — it goes into the
+            # returned dict so pass 2 can use it for neighbor comparison.
 
             del raw
             gc.collect()
@@ -1239,6 +1247,11 @@ async def jnj_match_photos(
                 "description_read": "",
                 "dhash": "",
                 "is_blank": is_blank,
+                "first_pass": first_pass,  # 'yes' / 'no' / 'maybe'
+                # ai_thumb_b64 is only sent back for 'maybe' photos to keep
+                # response size down. Client uses it to do a neighbor-check
+                # call to /api/jnj-resolve-maybe.
+                "ai_thumb_b64": ai_thumb_b64 if first_pass == "maybe" else "",
             }
 
         # Process sequentially to keep peak memory low. On Render Free
@@ -1312,6 +1325,74 @@ async def jnj_diag():
         "has_openai_key": bool(os.environ.get("OPENAI_API_KEY")),
         "python_version": _sys.version.split()[0],
     })
+
+
+@app.post("/api/jnj-resolve-maybe")
+async def jnj_resolve_maybe(
+    subject_b64: str = Form(...),
+    neighbor_b64s_json: str = Form(...),  # JSON list of base64 thumbs
+):
+    """v19 pass-2: given an ambiguous 'maybe' photo plus 1-3 confirmed 'yes'
+    neighbor thumbs, ask the AI whether the maybe photo is (a) a close-up
+    detail of the same item as the neighbors — in which case keep it, or
+    (b) a divider photo of no item — in which case skip it.
+
+    Returns {"is_item": bool}."""
+    try:
+        neighbors = json.loads(neighbor_b64s_json)
+        if not isinstance(neighbors, list):
+            neighbors = []
+    except Exception:
+        neighbors = []
+
+    if not subject_b64:
+        return JSONResponse({"is_item": True})  # safe default — keep the photo
+
+    # Cap to 3 neighbors to keep the call cheap.
+    neighbors = [n for n in neighbors if n][:3]
+
+    if not _OPENAI_KEY:
+        return JSONResponse({"is_item": True})
+
+    content: List[Dict] = [
+        {"type": "text", "text": (
+            "You are helping sort auction-sale photos. The FIRST image is the "
+            "photo being classified. The remaining images are photos taken "
+            "right before and/or after it in the same shoot — all confirmed "
+            "to contain auction items.\n\n"
+            "Question: is the FIRST photo a close-up detail of the SAME item "
+            "shown in the neighbor photos, or is it a divider/blank photo "
+            "(hand, floor, wall, texture with no item present, etc.)?\n\n"
+            "Answer ONLY 'item' if it appears to be a close-up of the same "
+            "item shown nearby (wagon wheel, tool blade, drawer, fabric of "
+            "the same piece, etc.).\n"
+            "Answer ONLY 'blank' if it's a divider photo with no item."
+        )},
+        {"type": "image_url", "image_url": {
+            "url": f"data:image/jpeg;base64,{subject_b64}",
+            "detail": "low",
+        }},
+    ]
+    for nb in neighbors:
+        content.append({"type": "image_url", "image_url": {
+            "url": f"data:image/jpeg;base64,{nb}",
+            "detail": "low",
+        }})
+
+    try:
+        resp = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": content}],
+            max_tokens=5,
+            temperature=0,
+        )
+        answer = (resp.choices[0].message.content or "").strip().lower()
+        is_item = not answer.startswith("b")  # blank -> not item
+        return JSONResponse({"is_item": is_item})
+    except Exception as e:
+        print(f"resolve-maybe failed: {type(e).__name__}: {e}", flush=True)
+        # Safe default — if AI fails, keep the photo.
+        return JSONResponse({"is_item": True})
 
 
 @app.post("/api/jnj-rematch")

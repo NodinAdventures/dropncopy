@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-19-ai-no-item-v18";
+const BUILD_ID = "2026-08-19-ai-neighbor-context-v19";
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -991,7 +991,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v18 · ${BUILD_ID}`;
+  badge.textContent = `v19 · ${BUILD_ID}`;
   document.body.appendChild(badge);
 } catch {}
 
@@ -1219,9 +1219,68 @@ async function jnjHandleFiles(files) {
       return d;
     }
 
-    // v15 matching: blank photos are hard delimiters between items.
-    // Dave's workflow: shoot item A photos → blank/black photo → shoot item B
-    // photos → blank/black photo → etc. We walk the photos in order, and
+    // v19 pass 2: for every photo the AI marked "maybe" (ambiguous close-up),
+    // pull the base64 thumbs of the closest 2 confirmed "yes" neighbors and
+    // ask the AI to decide — is the maybe a close-up detail of the same item,
+    // or a real divider photo?
+    async function resolveMaybe(idx) {
+      const p = allPhotoInfos[idx];
+      if (!p || p.first_pass !== "maybe" || !p.ai_thumb_b64) return;
+      // Look outward from idx to gather up to 3 nearest 'yes' neighbors.
+      const neighborThumbs = [];
+      let step = 1;
+      while (neighborThumbs.length < 3 && step < allPhotoInfos.length) {
+        for (const j of [idx - step, idx + step]) {
+          if (j < 0 || j >= allPhotoInfos.length) continue;
+          const q = allPhotoInfos[j];
+          if (!q || q.first_pass !== "yes") continue;
+          if (!q.thumb_data_url) continue;
+          // Extract raw base64 from the data URL prefix.
+          const b64 = q.thumb_data_url.replace(/^data:image\/jpeg;base64,/, "");
+          neighborThumbs.push(b64);
+          if (neighborThumbs.length >= 3) break;
+        }
+        step += 1;
+      }
+      // No confirmed neighbors? Keep the photo (safer than dropping it).
+      if (neighborThumbs.length === 0) {
+        p.is_blank = false;
+        return;
+      }
+      try {
+        const fd = new FormData();
+        fd.append("subject_b64", p.ai_thumb_b64);
+        fd.append("neighbor_b64s_json", JSON.stringify(neighborThumbs));
+        const url = "__PORT_5000__".startsWith("__")
+          ? "/api/jnj-resolve-maybe"
+          : "__PORT_5000__/api/jnj-resolve-maybe";
+        const res = await fetch(url, { method: "POST", body: fd });
+        const j = await res.json();
+        p.is_blank = !j.is_item;
+      } catch (e) {
+        console.warn("resolve-maybe failed for", p.filename, e);
+        p.is_blank = false;  // safe default — keep the photo
+      }
+      // Free memory — don't need the b64 anymore.
+      p.ai_thumb_b64 = "";
+    }
+
+    const maybeIndices = [];
+    for (let i = 0; i < allPhotoInfos.length; i++) {
+      if (allPhotoInfos[i].first_pass === "maybe") maybeIndices.push(i);
+    }
+    if (maybeIndices.length > 0) {
+      statusEl.textContent = `resolving ${maybeIndices.length} close-up photo${maybeIndices.length === 1 ? "" : "s"}…`;
+      // Run 3 at a time so we don't hammer OpenAI.
+      const CONC = 3;
+      for (let i = 0; i < maybeIndices.length; i += CONC) {
+        await Promise.all(maybeIndices.slice(i, i + CONC).map(resolveMaybe));
+      }
+    }
+
+    // v15/v19 matching: blank photos are hard delimiters between items.
+    // Dave's workflow: shoot item A photos → no-item photo → shoot item B
+    // photos → no-item photo → etc. We walk the photos in order, and
     // every time we see is_blank=true, we advance the cursor by 1 item.
     // Blank photos themselves are marked as skipped (not assigned to any item)
     // so they don't clutter the output.
