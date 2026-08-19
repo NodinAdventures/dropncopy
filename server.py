@@ -831,33 +831,31 @@ async def read_photo_tag(image_bytes: bytes, media_type: str, pre_shrunk: bool =
         b64 = base64.standard_b64encode(small_bytes).decode("utf-8")
         data_url = f"data:image/jpeg;base64,{b64}"
 
+        # v14: switched from gpt-4o → gpt-4o-mini. Mini is ~4× faster and
+        # ~15× cheaper, plenty accurate for reading a 3-digit tag number.
+        # Also shortened the prompt — mini burns fewer tokens on short prompts.
         resp = await client.chat.completions.create(
-            model="gpt-4o",
-            max_tokens=100,
+            model="gpt-4o-mini",
+            max_tokens=20,
             messages=[
-                {"role": "system", "content": JNJ_PHOTO_SYSTEM_PROMPT},
                 {
                     "role": "user",
                     "content": [
                         {"type": "image_url", "image_url": {"url": data_url, "detail": "low"}},
-                        {"type": "text", "text": "What's in this photo? Item number on a tag, or NO_TAG + description."},
+                        {"type": "text", "text": "Is there a small paper price tag with a handwritten item number visible? If yes, reply with ONLY that number (e.g. 7943). If no tag or unclear, reply with ONLY the word: NONE"},
                     ],
                 },
             ],
         )
-        raw = (resp.choices[0].message.content or "").strip()
-        lines = [l.strip() for l in raw.splitlines() if l.strip()]
-        if not lines:
+        raw = (resp.choices[0].message.content or "").strip().upper()
+        # Simplified for v14 mini prompt: response is either a tag number or NONE.
+        if not raw or raw.startswith("NONE") or raw.startswith("NO"):
             return {"tag": "", "description": ""}
-        first = lines[0].upper()
-        if first.startswith("NO_TAG"):
-            desc = lines[1] if len(lines) > 1 else ""
-            return {"tag": "", "description": desc.lower()}
-        # Sometimes the model wraps the tag in quotes or extra words
-        tag_match = re.search(r"([A-Z]?\d{2,}[A-Z]*)", first)
+        # Extract a tag — typically 3-5 digits, possibly with a letter prefix/suffix.
+        tag_match = re.search(r"([A-Z]?\d{3,}[A-Z]*)", raw)
         if tag_match:
             return {"tag": tag_match.group(1), "description": ""}
-        return {"tag": "", "description": first.lower()}
+        return {"tag": "", "description": ""}
     except Exception as e:
         # Best-effort: don't fail the whole build if one photo errors
         return {"tag": "", "description": "", "error": str(e)}
@@ -1201,20 +1199,22 @@ async def jnj_match_photos(
             if small_bytes:
                 dhash = compute_dhash_from_bytes(small_bytes)
 
-            # v13: AI tag reading DISABLED. Tags are rarely visible in Dave's
-            # shoots (per user), so 95%+ of vision calls returned nothing useful
-            # while eating 3s and OpenAI credits each. Order-based matching via
-            # dhash + user drag-to-fix is faster overall for real-world data.
-            # If tags become common again, re-enable read_photo_tag here.
-            del raw, small_bytes
+            # v14: AI tag reading RE-ENABLED with gpt-4o-mini (fast + cheap).
+            # When a tag IS visible on a photo, this snaps the order-based
+            # cursor back to the right item, which order-only matching can't do.
+            del raw
+            gc.collect()
+
+            read = await read_photo_tag(small_bytes, "image/jpeg", pre_shrunk=True)
+            del small_bytes
             gc.collect()
 
             return {
                 "id": f"p{idx}",
                 "filename": filename,
                 "thumb_data_url": thumb_data_url,
-                "tag_read": "",
-                "description_read": "",
+                "tag_read": read.get("tag", ""),
+                "description_read": read.get("description", ""),
                 "dhash": dhash,
             }
 

@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-19-no-ai-fast-v13";
+const BUILD_ID = "2026-08-19-anchor-distribute-v14";
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -34,10 +34,10 @@ const JNJ_BUILD_SHEET_URL = "__PORT_5000__".startsWith("__")
 const JNJ_MATCH_PHOTOS_URL = "__PORT_5000__".startsWith("__")
   ? "/api/jnj-match-photos"
   : "__PORT_5000__/api/jnj-match-photos";
-// v13: With AI tag-reading disabled, each photo is now just image shrink +
-// dhash (~50ms server-side). We can push batch size much higher and run
-// several batches in parallel to saturate the upload pipe.
-const JNJ_PHOTO_BATCH_SIZE = 25;
+// v14: gpt-4o-mini reads tags in ~1s each (vs 3-4s for gpt-4o). Photos in a
+// batch fire concurrently, so an 8-photo batch takes ~1.2s. 4 batches parallel
+// = 32 photos in flight, well within OpenAI rate limits and Render's memory.
+const JNJ_PHOTO_BATCH_SIZE = 8;
 const JNJ_PHOTO_CONCURRENCY = 4; // Number of batches to run in parallel.
 const JNJ_REMATCH_URL = "__PORT_5000__".startsWith("__")
   ? "/api/jnj-rematch"
@@ -990,7 +990,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v13 · ${BUILD_ID}`;
+  badge.textContent = `v14 · ${BUILD_ID}`;
   document.body.appendChild(badge);
 } catch {}
 
@@ -1218,33 +1218,60 @@ async function jnjHandleFiles(files) {
       return d;
     }
 
-    // Threshold: dhashes of same-item photos typically differ by 0–10 bits;
-    // different items differ by 20–40 bits. 18 sits comfortably between.
-    const SCENE_THRESHOLD = 18;
+    // v14 matching: photos are in shoot order = sheet order (per Dave).
+    // Instead of guessing scene changes, we anchor on tags read by AI and
+    // distribute the photos between anchors evenly across the items in that
+    // range. If NO tags are read, we distribute all photos evenly across all
+    // items. This is deterministic and never "bounces" — the user drag-fixes
+    // any misalignments in the preview UI, which is the whole point of it.
 
-    let cursor = 0;
-    let prevDhash = null;
-    for (const p of allPhotoInfos) {
+    // Step 1: build list of anchors [{photoIdx, itemIdx}] from tag reads.
+    // Photos with unreadable/ambiguous tags stay unanchored.
+    const anchors = [];
+    allPhotoInfos.forEach((p, photoIdx) => {
       if (p.match_kind === "tag" && indexByItemNum.has(p.item_num_match)) {
-        // Tag wins — jump cursor to the tagged item.
-        cursor = indexByItemNum.get(p.item_num_match);
-        prevDhash = p.dhash || "";
-        continue;
+        anchors.push({ photoIdx, itemIdx: indexByItemNum.get(p.item_num_match) });
       }
+    });
 
-      // Scene-change check against previous photo.
-      if (prevDhash !== null) {
-        const d = hammingDist(prevDhash, p.dhash || "");
-        if (d >= SCENE_THRESHOLD && cursor + 1 < items.length) {
-          cursor += 1;
+    // Step 2: split photos into segments by anchors, then distribute each
+    // segment evenly across the item range it spans.
+    //   • segment start = previous anchor's photoIdx (or 0)
+    //   • segment end   = this anchor's photoIdx (or allPhotoInfos.length)
+    //   • item range    = previous anchor's itemIdx (or 0) → this anchor's itemIdx
+    // Distribution is proportional: if segment has 12 photos over 4 items,
+    // photos 0–2 → item A, 3–5 → item B, 6–8 → item C, 9–11 → item D.
+    function assignSegment(startPhoto, endPhoto, startItem, endItem) {
+      const nPhotos = endPhoto - startPhoto;
+      const nItems = Math.max(1, endItem - startItem + 1);
+      if (nPhotos <= 0) return;
+      for (let i = 0; i < nPhotos; i++) {
+        // Even split across the item range.
+        const bucket = Math.min(nItems - 1, Math.floor((i * nItems) / nPhotos));
+        const itemIdx = Math.min(items.length - 1, startItem + bucket);
+        const p = allPhotoInfos[startPhoto + i];
+        if (p.match_kind === "none") {
+          p.item_num_match = itemNumByIndex[itemIdx] || "";
+          p.match_kind = p.item_num_match ? "order" : "none";
         }
       }
+    }
 
-      if (p.match_kind === "none") {
-        p.item_num_match = itemNumByIndex[cursor] || "";
-        p.match_kind = p.item_num_match ? "order" : "none";
+    if (anchors.length === 0) {
+      // No tags read — just spread all photos across all items evenly.
+      assignSegment(0, allPhotoInfos.length, 0, items.length - 1);
+    } else {
+      // Leading segment (photos before first anchor → items 0 → first anchor's item)
+      const first = anchors[0];
+      assignSegment(0, first.photoIdx, 0, first.itemIdx);
+      // Between consecutive anchors
+      for (let i = 0; i < anchors.length - 1; i++) {
+        const a = anchors[i], b = anchors[i + 1];
+        assignSegment(a.photoIdx + 1, b.photoIdx, a.itemIdx, b.itemIdx);
       }
-      prevDhash = p.dhash || "";
+      // Trailing segment (photos after last anchor → last anchor's item → last item)
+      const last = anchors[anchors.length - 1];
+      assignSegment(last.photoIdx + 1, allPhotoInfos.length, last.itemIdx, items.length - 1);
     }
 
     // Wire everything back into local state so the preview UI can render it.
