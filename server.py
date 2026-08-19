@@ -903,16 +903,19 @@ def parse_items_from_transcript(transcript: str) -> List[Dict[str, str]]:
 async def transcribe_uploaded_sheet(sheet: UploadFile) -> str:
     """Transcribe an uploaded sheet (PDF or image) to a cleaned transcript.
     Reuses the existing image / PDF logic without SSE streaming.
+
+    Pages are transcribed in PARALLEL to stay under Render's 30s proxy cap.
     """
     data = await sheet.read()
     fname = (sheet.filename or "").lower()
     if fname.endswith(".pdf"):
         page_bytes_list = render_pdf_pages(data, dpi=180)
-        page_texts = []
-        for pb in page_bytes_list:
-            if is_blank_image(pb):
-                continue
-            page_texts.append(await transcribe_image(pb, "image/png"))
+        non_blank = [pb for pb in page_bytes_list if not is_blank_image(pb)]
+        if not non_blank:
+            return ""
+        page_texts = await asyncio.gather(
+            *[transcribe_image(pb, "image/png") for pb in non_blank]
+        )
         return "\n".join(page_texts)
     else:
         # image path
