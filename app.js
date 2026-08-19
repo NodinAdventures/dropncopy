@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-19-blank-any-uniform-v16";
+const BUILD_ID = "2026-08-19-ai-no-item-v18";
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -34,12 +34,12 @@ const JNJ_BUILD_SHEET_URL = "__PORT_5000__".startsWith("__")
 const JNJ_MATCH_PHOTOS_URL = "__PORT_5000__".startsWith("__")
   ? "/api/jnj-match-photos"
   : "__PORT_5000__/api/jnj-match-photos";
-// v15: No AI in the photo path — blank-detection is pure PIL (image shrink +
-// std-dev on a 32px thumbnail). Each photo takes ~50-100ms server-side. We
-// can push much larger batches now that there's no OpenAI rate limit to worry
-// about. Bottleneck is now Render's CPU + upload bandwidth.
-const JNJ_PHOTO_BATCH_SIZE = 25;
-const JNJ_PHOTO_CONCURRENCY = 4; // Number of batches to run in parallel.
+// v18: AI is back in the photo path — gpt-4o-mini yes/no per photo (~250ms).
+// Photos in a batch run concurrently on the server, so what matters is how
+// many photos we let hit the API at once. 10 per batch, 3 batches concurrent
+// = 30 in flight, well under OpenAI's rate limit and Render's 512MB RAM.
+const JNJ_PHOTO_BATCH_SIZE = 10;
+const JNJ_PHOTO_CONCURRENCY = 3; // Number of batches to run in parallel.
 const JNJ_REMATCH_URL = "__PORT_5000__".startsWith("__")
   ? "/api/jnj-rematch"
   : "__PORT_5000__/api/jnj-rematch";
@@ -991,7 +991,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v16 · ${BUILD_ID}`;
+  badge.textContent = `v18 · ${BUILD_ID}`;
   document.body.appendChild(badge);
 } catch {}
 

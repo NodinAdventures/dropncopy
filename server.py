@@ -1158,70 +1158,31 @@ async def jnj_match_photos(
             raw = await photo.read()
             filename = photo.filename or f"photo_{idx}.jpg"
 
-            # v16: Dave shoots ITEM → BLANK/NO-SUBJECT PHOTO → next item.
-            # "Blank" per user = ANY photo with no auction item in frame:
-            #   • all black (lens cap, dark ceiling)
-            #   • all white / washed-out
-            #   • all skin (finger over lens, thumb, hand)
-            #   • all floor / carpet / wall / grass
-            # Unifying property: uniform surface, no distinct subject edges.
-            # A real item has edges (product outlines, shadows, hard corners).
-            # A hand/floor/wall does NOT — it's smooth across the whole frame.
-            #
-            # Detection strategy: compute edge density on a downsampled version.
-            # Sobel-lite: sum |neighbor pixel differences|. High = real subject,
-            # low = uniform surface regardless of color.
+            # v18: Ask AI whether the photo contains an auction item.
+            # Dave's workflow: [item A photos] → [no-item photo] → [item B photos] → ...
+            # A "no-item" photo can be anything Dave shoots between items:
+            # black, white, hand, floor, wall, ceiling, sky, grass, blur, etc.
+            # The only reliable way to distinguish these from real items is
+            # to actually LOOK at the photo. gpt-4o-mini vision does this for
+            # ~$0.001 per photo and ~250ms latency.
             thumb_data_url = ""
             is_blank = False
+            ai_thumb_b64 = ""  # small thumb we send to OpenAI
             try:
                 with Image.open(io.BytesIO(raw)) as img:
                     rgb = img.convert("RGB")
-                    # 64x64 grayscale is enough to measure edge density without
-                    # being CPU-heavy (~4k pixels vs ~1M for the raw photo).
-                    tiny = rgb.copy().convert("L")
-                    tiny.thumbnail((64, 64))
-                    tw, th = tiny.size
-                    px = list(tiny.getdata())
-                    tiny.close()
-                    if px and tw > 2 and th > 2:
-                        # Simple edge-density metric: for each pixel, average the
-                        # absolute difference vs its right and bottom neighbors.
-                        # Real items: edge_density typically 15-60.
-                        # Skin/floor/wall: edge_density typically 2-10.
-                        # Pure black/white: edge_density ~0-3.
-                        edge_sum = 0
-                        edge_count = 0
-                        for y in range(th - 1):
-                            row_start = y * tw
-                            next_row_start = (y + 1) * tw
-                            for x in range(tw - 1):
-                                p = px[row_start + x]
-                                dx = abs(px[row_start + x + 1] - p)
-                                dy = abs(px[next_row_start + x] - p)
-                                edge_sum += dx + dy
-                                edge_count += 2
-                        edge_density = edge_sum / edge_count if edge_count else 0
 
-                        # Also compute mean + std_dev as tie-breakers.
-                        mean_lum = sum(px) / len(px)
-                        variance = sum((v - mean_lum) ** 2 for v in px) / len(px)
-                        std_dev = variance ** 0.5
+                    # Small thumb for the AI check (256px is plenty — the model
+                    # only needs to see "is there a subject or is this a hand/floor/etc").
+                    ai_buf = io.BytesIO()
+                    ai_copy = rgb.copy()
+                    ai_copy.thumbnail((256, 256))
+                    ai_copy.save(ai_buf, format="JPEG", quality=70)
+                    ai_thumb_b64 = base64.standard_b64encode(ai_buf.getvalue()).decode("utf-8")
+                    ai_copy.close()
+                    del ai_buf, ai_copy
 
-                        # BLANK if:
-                        #   1. Low edge density AND low overall variation
-                        #      (uniform surface — floor, wall, skin, sky, etc.)
-                        #   2. Pure black photo (mean very low, edges very low)
-                        #   3. Pure white photo (mean very high, edges very low)
-                        # Threshold 12 on edge_density catches skin/floor/wall
-                        # comfortably while leaving real items (≥15) safe.
-                        if edge_density < 12 and std_dev < 40:
-                            is_blank = True
-                        elif mean_lum < 30 and edge_density < 15:
-                            is_blank = True
-                        elif mean_lum > 225 and edge_density < 15:
-                            is_blank = True
-
-                    # 160px thumb for the UI (base64 in JSON — keep small)
+                    # 160px thumb for the UI display
                     tbuf = io.BytesIO()
                     rgb.thumbnail((160, 160))
                     rgb.save(tbuf, format="JPEG", quality=70)
@@ -1231,6 +1192,41 @@ async def jnj_match_photos(
                     del rgb, tbuf, thumb_b64
             except Exception as e:
                 print(f"process_photo shrink failed for {filename}: {e}", flush=True)
+
+            # Ask the AI: is there an auction item in this photo?
+            # We only need a yes/no. Keep prompt tight to minimize tokens.
+            if ai_thumb_b64 and _OPENAI_KEY:
+                try:
+                    resp = await client.chat.completions.create(
+                        model="gpt-4o-mini",
+                        messages=[{
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": (
+                                    "Does this photo contain a distinct auction item "
+                                    "(furniture, tool, collectible, appliance, décor, "
+                                    "vehicle, etc.)? Answer ONLY 'yes' or 'no'. "
+                                    "Answer 'no' if the photo shows: a hand/finger, a "
+                                    "floor/carpet/wall/ceiling/sky with no item, an "
+                                    "all-black or all-white frame, a blurry shot with "
+                                    "no identifiable subject, or an intentional divider photo."
+                                )},
+                                {"type": "image_url", "image_url": {
+                                    "url": f"data:image/jpeg;base64,{ai_thumb_b64}",
+                                    "detail": "low",
+                                }},
+                            ],
+                        }],
+                        max_tokens=3,
+                        temperature=0,
+                    )
+                    answer = (resp.choices[0].message.content or "").strip().lower()
+                    if answer.startswith("n"):
+                        is_blank = True
+                except Exception as e:
+                    print(f"has-item check failed for {filename}: {type(e).__name__}: {e}", flush=True)
+
+            del ai_thumb_b64
 
             del raw
             gc.collect()
