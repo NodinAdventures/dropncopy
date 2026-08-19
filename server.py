@@ -1125,15 +1125,23 @@ async def jnj_match_photos(
         # than all N at once.
         import gc
 
-        def compute_dhash(pil_img) -> str:
-            """Cheap perceptual hash: shrink to 9x8 grayscale, compare adjacent
-            pixels. Two photos of the same item have similar dhash; photos of
-            different items have very different dhashes. Costs ~1ms per photo
-            and returns a 16-char hex string.
+        def compute_dhash_from_bytes(jpeg_bytes: bytes) -> str:
+            """Cheap perceptual hash: decode a small JPEG in a fresh PIL image,
+            shrink to 9x8 grayscale, compare adjacent pixels. Two photos of the
+            same item have similar dhash; photos of different items have very
+            different dhashes. Costs ~1ms per photo and returns a 16-char hex
+            string. Isolated in its own decode so a PIL failure here can't
+            corrupt the shared image used by the vision API.
             """
             try:
-                small = pil_img.convert("L").resize((9, 8), Image.LANCZOS)
-                pixels = list(small.getdata())
+                with Image.open(io.BytesIO(jpeg_bytes)) as src:
+                    small = src.convert("L").resize((9, 8), Image.LANCZOS)
+                    # Use .tobytes() — works on all Pillow versions and doesn't
+                    # have the getdata() deprecation. 72 bytes for a 9x8 L image.
+                    pixels = small.tobytes()
+                    small.close()
+                if len(pixels) < 72:
+                    return ""
                 bits = 0
                 for row in range(8):
                     for col in range(8):
@@ -1141,7 +1149,11 @@ async def jnj_match_photos(
                         right = pixels[row * 9 + col + 1]
                         bits = (bits << 1) | (1 if left > right else 0)
                 return f"{bits:016x}"
-            except Exception:
+            except Exception as e:
+                # Never let this abort the request — dhash is a best-effort
+                # signal; if it's missing the client just won't detect scene
+                # changes for that one photo.
+                print(f"dhash failed: {type(e).__name__}: {e}", flush=True)
                 return ""
 
         async def process_photo(idx: int, photo: UploadFile) -> Dict:
@@ -1162,8 +1174,6 @@ async def jnj_match_photos(
             try:
                 with Image.open(io.BytesIO(raw)) as img:
                     rgb = img.convert("RGB")
-                    # 0) Perceptual hash for scene-change detection (near-free)
-                    dhash = compute_dhash(rgb)
                     # 1) 768px JPEG for vision API (tag reading only)
                     big = rgb.copy()
                     big.thumbnail((768, 768))
@@ -1182,6 +1192,14 @@ async def jnj_match_photos(
                     del rgb, tbuf, thumb_b64
             except Exception as e:
                 print(f"process_photo shrink failed for {filename}: {e}", flush=True)
+
+            # Compute dhash from the already-shrunk 768px JPEG in a totally
+            # isolated decode. This decouples it from the main PIL context so a
+            # dhash failure can't crash the vision-API path, and it works on the
+            # small bytes (fast, ~2MB peak instead of ~15MB from the raw phone
+            # photo).
+            if small_bytes:
+                dhash = compute_dhash_from_bytes(small_bytes)
 
             # Free the original big bytes NOW — don't hold them across the
             # OpenAI call (which takes 3–10s).
@@ -1205,9 +1223,26 @@ async def jnj_match_photos(
         # (512MB), running 6 phone photos through asyncio.gather peaks around
         # 400MB — too close to the OOM cliff. Sequential adds ~5–10s to a batch
         # but avoids 502s from the worker being killed.
+        # Each photo is wrapped in its own try/except so a single bad photo
+        # can't take down the entire batch (which is what caused the SIGABRT
+        # crash we saw in v9 — status 134 = native library abort).
         photo_infos: List[Dict] = []
         for i, p in enumerate(photos):
-            photo_infos.append(await process_photo(i, p))
+            try:
+                photo_infos.append(await process_photo(i, p))
+            except Exception as e:
+                print(f"process_photo failed for photo {i} ({getattr(p,'filename','?')}): {type(e).__name__}: {e}", flush=True)
+                # Return a stub so the client still sees this photo (unmatched)
+                # rather than losing it entirely.
+                photo_infos.append({
+                    "id": f"p{i}",
+                    "filename": getattr(p, "filename", f"photo_{i}.jpg") or f"photo_{i}.jpg",
+                    "thumb_data_url": "",
+                    "tag_read": "",
+                    "description_read": "",
+                    "dhash": "",
+                    "error": f"{type(e).__name__}: {str(e)[:200]}",
+                })
         valid_items = {i["item_num"] for i in items}
 
         for p in photo_infos:

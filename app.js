@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-19-scene-change-v9";
+const BUILD_ID = "2026-08-19-scene-change-safe-v10";
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
