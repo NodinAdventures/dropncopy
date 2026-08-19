@@ -1201,21 +1201,20 @@ async def jnj_match_photos(
             if small_bytes:
                 dhash = compute_dhash_from_bytes(small_bytes)
 
-            # Free the original big bytes NOW — don't hold them across the
-            # OpenAI call (which takes 3–10s).
-            del raw
-            gc.collect()
-
-            read = await read_photo_tag(small_bytes, "image/jpeg", pre_shrunk=True)
-            del small_bytes
+            # v13: AI tag reading DISABLED. Tags are rarely visible in Dave's
+            # shoots (per user), so 95%+ of vision calls returned nothing useful
+            # while eating 3s and OpenAI credits each. Order-based matching via
+            # dhash + user drag-to-fix is faster overall for real-world data.
+            # If tags become common again, re-enable read_photo_tag here.
+            del raw, small_bytes
             gc.collect()
 
             return {
                 "id": f"p{idx}",
                 "filename": filename,
                 "thumb_data_url": thumb_data_url,
-                "tag_read": read.get("tag", ""),
-                "description_read": read.get("description", ""),
+                "tag_read": "",
+                "description_read": "",
                 "dhash": dhash,
             }
 

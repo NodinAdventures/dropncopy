@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-19-parallel-batches-v12";
+const BUILD_ID = "2026-08-19-no-ai-fast-v13";
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -34,11 +34,11 @@ const JNJ_BUILD_SHEET_URL = "__PORT_5000__".startsWith("__")
 const JNJ_MATCH_PHOTOS_URL = "__PORT_5000__".startsWith("__")
   ? "/api/jnj-match-photos"
   : "__PORT_5000__/api/jnj-match-photos";
-// Batch size: keep each photo POST under Render's ~30s proxy timeout AND
-// under the 512MB RAM cap on Free tier. 3 photos = ~15–20s per batch,
-// well within limits.
-const JNJ_PHOTO_BATCH_SIZE = 8;
-const JNJ_PHOTO_CONCURRENCY = 3; // Number of batches to run in parallel.
+// v13: With AI tag-reading disabled, each photo is now just image shrink +
+// dhash (~50ms server-side). We can push batch size much higher and run
+// several batches in parallel to saturate the upload pipe.
+const JNJ_PHOTO_BATCH_SIZE = 25;
+const JNJ_PHOTO_CONCURRENCY = 4; // Number of batches to run in parallel.
 const JNJ_REMATCH_URL = "__PORT_5000__".startsWith("__")
   ? "/api/jnj-rematch"
   : "__PORT_5000__/api/jnj-rematch";
@@ -990,7 +990,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v12 · ${BUILD_ID}`;
+  badge.textContent = `v13 · ${BUILD_ID}`;
   document.body.appendChild(badge);
 } catch {}
 
