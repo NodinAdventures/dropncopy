@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-19-anchor-distribute-v14";
+const BUILD_ID = "2026-08-19-blank-divider-v15";
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -34,10 +34,11 @@ const JNJ_BUILD_SHEET_URL = "__PORT_5000__".startsWith("__")
 const JNJ_MATCH_PHOTOS_URL = "__PORT_5000__".startsWith("__")
   ? "/api/jnj-match-photos"
   : "__PORT_5000__/api/jnj-match-photos";
-// v14: gpt-4o-mini reads tags in ~1s each (vs 3-4s for gpt-4o). Photos in a
-// batch fire concurrently, so an 8-photo batch takes ~1.2s. 4 batches parallel
-// = 32 photos in flight, well within OpenAI rate limits and Render's memory.
-const JNJ_PHOTO_BATCH_SIZE = 8;
+// v15: No AI in the photo path — blank-detection is pure PIL (image shrink +
+// std-dev on a 32px thumbnail). Each photo takes ~50-100ms server-side. We
+// can push much larger batches now that there's no OpenAI rate limit to worry
+// about. Bottleneck is now Render's CPU + upload bandwidth.
+const JNJ_PHOTO_BATCH_SIZE = 25;
 const JNJ_PHOTO_CONCURRENCY = 4; // Number of batches to run in parallel.
 const JNJ_REMATCH_URL = "__PORT_5000__".startsWith("__")
   ? "/api/jnj-rematch"
@@ -990,7 +991,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v14 · ${BUILD_ID}`;
+  badge.textContent = `v15 · ${BUILD_ID}`;
   document.body.appendChild(badge);
 } catch {}
 
@@ -1218,60 +1219,26 @@ async function jnjHandleFiles(files) {
       return d;
     }
 
-    // v14 matching: photos are in shoot order = sheet order (per Dave).
-    // Instead of guessing scene changes, we anchor on tags read by AI and
-    // distribute the photos between anchors evenly across the items in that
-    // range. If NO tags are read, we distribute all photos evenly across all
-    // items. This is deterministic and never "bounces" — the user drag-fixes
-    // any misalignments in the preview UI, which is the whole point of it.
-
-    // Step 1: build list of anchors [{photoIdx, itemIdx}] from tag reads.
-    // Photos with unreadable/ambiguous tags stay unanchored.
-    const anchors = [];
-    allPhotoInfos.forEach((p, photoIdx) => {
-      if (p.match_kind === "tag" && indexByItemNum.has(p.item_num_match)) {
-        anchors.push({ photoIdx, itemIdx: indexByItemNum.get(p.item_num_match) });
+    // v15 matching: blank photos are hard delimiters between items.
+    // Dave's workflow: shoot item A photos → blank/black photo → shoot item B
+    // photos → blank/black photo → etc. We walk the photos in order, and
+    // every time we see is_blank=true, we advance the cursor by 1 item.
+    // Blank photos themselves are marked as skipped (not assigned to any item)
+    // so they don't clutter the output.
+    let cursor = 0;
+    for (const p of allPhotoInfos) {
+      if (p.is_blank) {
+        // Divider photo — skip it, advance cursor to next item.
+        if (cursor + 1 < items.length) cursor += 1;
+        p.item_num_match = "";
+        p.match_kind = "blank"; // special marker; won't be assigned or unmatched
+        continue;
       }
-    });
-
-    // Step 2: split photos into segments by anchors, then distribute each
-    // segment evenly across the item range it spans.
-    //   • segment start = previous anchor's photoIdx (or 0)
-    //   • segment end   = this anchor's photoIdx (or allPhotoInfos.length)
-    //   • item range    = previous anchor's itemIdx (or 0) → this anchor's itemIdx
-    // Distribution is proportional: if segment has 12 photos over 4 items,
-    // photos 0–2 → item A, 3–5 → item B, 6–8 → item C, 9–11 → item D.
-    function assignSegment(startPhoto, endPhoto, startItem, endItem) {
-      const nPhotos = endPhoto - startPhoto;
-      const nItems = Math.max(1, endItem - startItem + 1);
-      if (nPhotos <= 0) return;
-      for (let i = 0; i < nPhotos; i++) {
-        // Even split across the item range.
-        const bucket = Math.min(nItems - 1, Math.floor((i * nItems) / nPhotos));
-        const itemIdx = Math.min(items.length - 1, startItem + bucket);
-        const p = allPhotoInfos[startPhoto + i];
-        if (p.match_kind === "none") {
-          p.item_num_match = itemNumByIndex[itemIdx] || "";
-          p.match_kind = p.item_num_match ? "order" : "none";
-        }
+      // Regular photo — assign to current item.
+      if (p.match_kind === "none") {
+        p.item_num_match = itemNumByIndex[cursor] || "";
+        p.match_kind = p.item_num_match ? "order" : "none";
       }
-    }
-
-    if (anchors.length === 0) {
-      // No tags read — just spread all photos across all items evenly.
-      assignSegment(0, allPhotoInfos.length, 0, items.length - 1);
-    } else {
-      // Leading segment (photos before first anchor → items 0 → first anchor's item)
-      const first = anchors[0];
-      assignSegment(0, first.photoIdx, 0, first.itemIdx);
-      // Between consecutive anchors
-      for (let i = 0; i < anchors.length - 1; i++) {
-        const a = anchors[i], b = anchors[i + 1];
-        assignSegment(a.photoIdx + 1, b.photoIdx, a.itemIdx, b.itemIdx);
-      }
-      // Trailing segment (photos after last anchor → last anchor's item → last item)
-      const last = anchors[anchors.length - 1];
-      assignSegment(last.photoIdx + 1, allPhotoInfos.length, last.itemIdx, items.length - 1);
     }
 
     // Wire everything back into local state so the preview UI can render it.
@@ -1288,21 +1255,30 @@ async function jnjHandleFiles(files) {
         item_num_match: p.item_num_match,
         match_kind: p.match_kind,
         dhash: p.dhash || "",
+        is_blank: p.is_blank || false,
       });
     }
     const itemPhotos = {};
     const unmatched = [];
+    const blanks = [];
     for (const it of items) itemPhotos[it.item_num] = [];
     // Iterate in original upload order so the item-cards list photos in the
     // sequence Dave took them.
     for (const p of allPhotoInfos) {
       const info = photoMap.get(p.filename);
       if (!info) continue;
-      if (info.item_num_match && itemPhotos[info.item_num_match]) {
+      if (info.match_kind === "blank") {
+        // Blank divider — not assigned, not unmatched, just tracked so we
+        // can show a count/toast to the user.
+        blanks.push(p.filename);
+      } else if (info.item_num_match && itemPhotos[info.item_num_match]) {
         itemPhotos[info.item_num_match].push(p.filename);
       } else {
         unmatched.push(p.filename);
       }
+    }
+    if (blanks.length > 0) {
+      toast(`Detected ${blanks.length} blank divider${blanks.length===1?"":"s"} — split items accordingly.`);
     }
 
     jnjState = { items, photos: photoMap, itemPhotos, unmatched };

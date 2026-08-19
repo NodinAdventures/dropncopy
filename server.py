@@ -1157,30 +1157,41 @@ async def jnj_match_photos(
         async def process_photo(idx: int, photo: UploadFile) -> Dict:
             raw = await photo.read()
             filename = photo.filename or f"photo_{idx}.jpg"
-            media_type = photo.content_type or "image/jpeg"
-            if not media_type.startswith("image/"):
-                media_type = "image/jpeg"
 
-            # Shrink to 768px (used for AI) and 160px (used for UI thumb).
-            # 768px is plenty for reading a 3-digit tag number and cuts peak
-            # PIL bitmap from ~13MB to ~7MB per photo. Free the big bitmap
-            # ASAP with a `with` block so RAM returns to baseline between
-            # photos on Render's 512MB Free/Starter tier.
-            small_bytes = b""
+            # v15: Dave shoots ITEM → BLANK/BLACK PHOTO → next item. Blank photos
+            # are hard delimiters between items. No AI, no dhash, no guessing.
+            # We just need to detect "blank" (all dark OR all light with no
+            # detail) and use that as a break marker.
             thumb_data_url = ""
-            dhash = ""
+            is_blank = False
             try:
                 with Image.open(io.BytesIO(raw)) as img:
                     rgb = img.convert("RGB")
-                    # 1) 768px JPEG for vision API (tag reading only)
-                    big = rgb.copy()
-                    big.thumbnail((768, 768))
-                    bbuf = io.BytesIO()
-                    big.save(bbuf, format="JPEG", quality=80)
-                    small_bytes = bbuf.getvalue()
-                    big.close()
-                    del big, bbuf
-                    # 2) 160px thumb for the UI (base64 in JSON — keep small)
+                    # Downsample to a tiny image for blank detection —
+                    # a 32x32 grayscale has enough info to know if a photo is
+                    # "nothing" vs a real subject.
+                    tiny = rgb.copy().convert("L")
+                    tiny.thumbnail((32, 32))
+                    px = list(tiny.getdata())
+                    tiny.close()
+                    if px:
+                        mean_lum = sum(px) / len(px)
+                        # Standard deviation — measures how much variation there
+                        # is in the image. A real photo has lots of variation.
+                        # A blank/black/washed-out photo has almost none.
+                        variance = sum((v - mean_lum) ** 2 for v in px) / len(px)
+                        std_dev = variance ** 0.5
+                        # Blank if: (all very dark AND low variation) OR
+                        #           (all very bright AND low variation) OR
+                        #           very low variation overall (blurry white/black)
+                        if std_dev < 12:  # essentially uniform image
+                            is_blank = True
+                        elif mean_lum < 25 and std_dev < 20:  # black photo
+                            is_blank = True
+                        elif mean_lum > 230 and std_dev < 20:  # washed-out white
+                            is_blank = True
+
+                    # 160px thumb for the UI (base64 in JSON — keep small)
                     tbuf = io.BytesIO()
                     rgb.thumbnail((160, 160))
                     rgb.save(tbuf, format="JPEG", quality=70)
@@ -1191,31 +1202,17 @@ async def jnj_match_photos(
             except Exception as e:
                 print(f"process_photo shrink failed for {filename}: {e}", flush=True)
 
-            # Compute dhash from the already-shrunk 768px JPEG in a totally
-            # isolated decode. This decouples it from the main PIL context so a
-            # dhash failure can't crash the vision-API path, and it works on the
-            # small bytes (fast, ~2MB peak instead of ~15MB from the raw phone
-            # photo).
-            if small_bytes:
-                dhash = compute_dhash_from_bytes(small_bytes)
-
-            # v14: AI tag reading RE-ENABLED with gpt-4o-mini (fast + cheap).
-            # When a tag IS visible on a photo, this snaps the order-based
-            # cursor back to the right item, which order-only matching can't do.
             del raw
-            gc.collect()
-
-            read = await read_photo_tag(small_bytes, "image/jpeg", pre_shrunk=True)
-            del small_bytes
             gc.collect()
 
             return {
                 "id": f"p{idx}",
                 "filename": filename,
                 "thumb_data_url": thumb_data_url,
-                "tag_read": read.get("tag", ""),
-                "description_read": read.get("description", ""),
-                "dhash": dhash,
+                "tag_read": "",
+                "description_read": "",
+                "dhash": "",
+                "is_blank": is_blank,
             }
 
         # Process sequentially to keep peak memory low. On Render Free
