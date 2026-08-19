@@ -8,6 +8,9 @@
 ========================================================= */
 
 const PASSWORD = "LunchTime";
+// Deploy marker — bump when shipping a new build. Visible in the footer so
+// you can verify the browser is running the latest code without opening devtools.
+const BUILD_ID = "2026-08-18-staging-workflow-v2";
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -697,18 +700,127 @@ function jnjSavePrefs() {
   });
 }
 
-// The dropzone is now a native <label for="jnjFileInput"> which opens the
-// file picker natively on all platforms including iOS Safari. No JS click
-// handler needed. We only wire up the change and drag/drop events here.
-jnjFileInput.addEventListener("change", (e) => {
-  jnjHandleFiles(Array.from(e.target.files || []));
-  jnjFileInput.value = "";
+/* ---- STAGING WORKFLOW ----
+   iOS Safari can only pick photos OR files in a single picker session, not
+   both. So we let the user stage the sheet and the photos in TWO separate
+   picks, watch them accumulate in a preview list, then hit "Build sale" when
+   they're ready. Drag-and-drop still works for desktop — dropped files just
+   get merged into the staged list instead of firing the API immediately.
+*/
+
+const jnjSheetInput = document.getElementById("jnjSheetInput");
+const jnjPhotosInput = document.getElementById("jnjPhotosInput");
+const jnjAddSheetBtn = document.getElementById("jnjAddSheetBtn");
+const jnjAddPhotosBtn = document.getElementById("jnjAddPhotosBtn");
+const jnjBuildBtn = document.getElementById("jnjBuildBtn");
+const jnjClearStagedBtn = document.getElementById("jnjClearStagedBtn");
+const jnjStagedList = document.getElementById("jnjStagedList");
+const jnjStageActions = document.getElementById("jnjStageActions");
+
+// Staged files live here until the user taps Build.
+let jnjStaged = { sheet: null, photos: [] };
+
+function jnjRenderStaged() {
+  const hasAny = jnjStaged.sheet || jnjStaged.photos.length > 0;
+  jnjStagedList.style.display = hasAny ? "block" : "none";
+  jnjStageActions.style.display = hasAny ? "flex" : "none";
+
+  const rows = [];
+  if (jnjStaged.sheet) {
+    const s = jnjStaged.sheet;
+    rows.push(`<div class="jnj-staged-row" style="display:flex;align-items:center;gap:10px;padding:8px 12px;background:rgba(147,112,255,0.08);border:1px solid rgba(147,112,255,0.25);border-radius:8px;margin-bottom:6px;">
+      <span style="font-size:11px;font-weight:600;color:#9370ff;letter-spacing:0.5px;">SHEET</span>
+      <span style="flex:1;font-size:13px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(s.name || "(no name)")}</span>
+      <span style="font-size:11px;color:var(--muted);">${(s.size/1024).toFixed(0)} KB</span>
+      <button type="button" data-remove="sheet" class="ghost-btn" style="padding:2px 8px;font-size:12px;">Remove</button>
+    </div>`);
+  }
+  jnjStaged.photos.forEach((p, i) => {
+    rows.push(`<div class="jnj-staged-row" style="display:flex;align-items:center;gap:10px;padding:6px 12px;font-size:13px;">
+      <span style="font-size:11px;color:var(--muted);width:24px;">${i+1}.</span>
+      <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(p.name || "photo")}</span>
+      <span style="font-size:11px;color:var(--muted);">${(p.size/1024).toFixed(0)} KB</span>
+      <button type="button" data-remove-photo="${i}" class="ghost-btn" style="padding:2px 8px;font-size:12px;">Remove</button>
+    </div>`);
+  });
+
+  if (hasAny) {
+    const total = (jnjStaged.sheet ? 1 : 0) + jnjStaged.photos.length;
+    const missing = [];
+    if (!jnjStaged.sheet) missing.push("sheet");
+    if (jnjStaged.photos.length === 0) missing.push("at least 1 photo");
+    const header = missing.length
+      ? `<div style="font-size:12px;color:#ff9a3d;margin-bottom:8px;font-weight:600;">Still need: ${missing.join(" and ")}</div>`
+      : `<div style="font-size:12px;color:#3ecf8e;margin-bottom:8px;font-weight:600;">Ready — ${total} files staged</div>`;
+    jnjStagedList.innerHTML = header + rows.join("");
+  }
+  jnjBuildBtn.disabled = !(jnjStaged.sheet && jnjStaged.photos.length > 0);
+  jnjBuildBtn.style.opacity = jnjBuildBtn.disabled ? "0.5" : "1";
+}
+
+// Remove buttons on staged rows
+jnjStagedList.addEventListener("click", (e) => {
+  const btn = e.target.closest("button");
+  if (!btn) return;
+  if (btn.dataset.remove === "sheet") {
+    jnjStaged.sheet = null;
+    jnjRenderStaged();
+  } else if (btn.dataset.removePhoto !== undefined) {
+    const idx = parseInt(btn.dataset.removePhoto, 10);
+    if (!isNaN(idx)) {
+      jnjStaged.photos.splice(idx, 1);
+      jnjRenderStaged();
+    }
+  }
 });
 
+// Wire the two staged inputs
+jnjAddSheetBtn.addEventListener("click", (e) => {
+  e.preventDefault();
+  jnjSheetInput.click();
+});
+jnjAddPhotosBtn.addEventListener("click", (e) => {
+  e.preventDefault();
+  jnjPhotosInput.click();
+});
+
+jnjSheetInput.addEventListener("change", (e) => {
+  const f = e.target.files && e.target.files[0];
+  if (f) {
+    jnjStaged.sheet = f;
+    jnjRenderStaged();
+  }
+  jnjSheetInput.value = "";
+});
+
+jnjPhotosInput.addEventListener("change", (e) => {
+  const files = Array.from(e.target.files || []);
+  for (const f of files) {
+    // Avoid duplicates by name+size
+    if (!jnjStaged.photos.some(p => p.name === f.name && p.size === f.size)) {
+      jnjStaged.photos.push(f);
+    }
+  }
+  jnjRenderStaged();
+  jnjPhotosInput.value = "";
+});
+
+jnjClearStagedBtn.addEventListener("click", () => {
+  jnjStaged = { sheet: null, photos: [] };
+  jnjRenderStaged();
+});
+
+jnjBuildBtn.addEventListener("click", () => {
+  if (!jnjStaged.sheet || jnjStaged.photos.length === 0) return;
+  const allFiles = [jnjStaged.sheet, ...jnjStaged.photos];
+  jnjHandleFiles(allFiles);
+});
+
+// Drag-and-drop desktop path — dropped files merge into staged list.
+// A .pdf file goes into the sheet slot; images go into photos.
 ["dragenter", "dragover"].forEach(ev =>
   jnjDropZone.addEventListener(ev, (e) => {
     e.preventDefault(); e.stopPropagation();
-    // Only visually highlight if this isn't a photo-thumb drag (that has our custom type)
     if (!e.dataTransfer.types.includes("application/x-jnj-photo")) {
       jnjDropZone.classList.add("drag-over");
     }
@@ -721,10 +833,53 @@ jnjFileInput.addEventListener("change", (e) => {
   })
 );
 jnjDropZone.addEventListener("drop", (e) => {
-  if (e.dataTransfer.types.includes("application/x-jnj-photo")) return; // photo-thumb drag, ignore
+  if (e.dataTransfer.types.includes("application/x-jnj-photo")) return;
   const files = Array.from(e.dataTransfer.files || []);
-  if (files.length) jnjHandleFiles(files);
+  if (!files.length) return;
+  for (const f of files) {
+    const name = (f.name || "").toLowerCase();
+    const isPdf = name.endsWith(".pdf") || f.type === "application/pdf";
+    if (isPdf && !jnjStaged.sheet) {
+      jnjStaged.sheet = f;
+    } else {
+      // Not a PDF, or sheet slot already filled — add to photos (skip dupes).
+      if (!jnjStaged.photos.some(p => p.name === f.name && p.size === f.size)) {
+        jnjStaged.photos.push(f);
+      }
+    }
+  }
+  jnjRenderStaged();
 });
+
+// Fallback legacy input — keep for anything still referencing jnjFileInput.
+jnjFileInput.addEventListener("change", (e) => {
+  const files = Array.from(e.target.files || []);
+  for (const f of files) {
+    const name = (f.name || "").toLowerCase();
+    const isPdf = name.endsWith(".pdf") || f.type === "application/pdf";
+    if (isPdf && !jnjStaged.sheet) jnjStaged.sheet = f;
+    else if (!jnjStaged.photos.some(p => p.name === f.name && p.size === f.size)) {
+      jnjStaged.photos.push(f);
+    }
+  }
+  jnjRenderStaged();
+  jnjFileInput.value = "";
+});
+
+// Initial render (disables Build until files staged)
+jnjRenderStaged();
+
+// Stamp the build ID into the footer so we can visually confirm the deploy
+// landed on the phone (no devtools needed).
+try {
+  const footer = document.querySelector(".app-footer");
+  if (footer) {
+    const stamp = document.createElement("div");
+    stamp.style.cssText = "margin-top:6px;font-size:11px;opacity:0.5;";
+    stamp.textContent = `Build: ${BUILD_ID}`;
+    footer.appendChild(stamp);
+  }
+} catch {}
 
 async function jnjHandleFiles(files) {
   if (!files.length) return;
