@@ -930,6 +930,83 @@ async def transcribe_uploaded_sheet(sheet: UploadFile) -> str:
         return text
 
 
+async def extract_seller_number(image_bytes: bytes, media_type: str) -> str:
+    """Find the hand-drawn BOXED seller number in the top header area of a
+    JnJ intake sheet. The seller draws a rectangle/square around 2-4 digits
+    (like 2860, 6009, 559) in the top ~20% of the page. That number is the
+    seller's staff ID and must appear on every item in the CSV so it shows
+    up on the JnJ website.
+
+    Returns the digits only (e.g. '2860'), or '' if none found. gpt-4o-mini
+    is plenty for this — ~250ms, ~$0.001.
+    """
+    if not _OPENAI_KEY:
+        return ""
+    try:
+        b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
+        resp = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            max_tokens=15,
+            temperature=0,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": (
+                        "Find the HAND-DRAWN box (rectangle or square drawn in pen) "
+                        "in the TOP HEADER area of this auction intake sheet. "
+                        "Inside the box is a 2-5 digit number (e.g. 2860, 6009, 559).\n\n"
+                        "Ignore any printed boxes, printed labels, or the LISTER box "
+                        "at the bottom. Ignore item/lot numbers in the grid. Look ONLY "
+                        "for a hand-drawn box in the top portion of the page.\n\n"
+                        "Reply with ONLY the digits inside that box. If you cannot find "
+                        "a hand-drawn box with a number, reply with exactly: NONE"
+                    )},
+                    {"type": "image_url", "image_url": {
+                        "url": f"data:{media_type};base64,{b64}",
+                        "detail": "high",
+                    }},
+                ],
+            }],
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        # Keep only digits.
+        digits = re.sub(r"[^0-9]", "", raw)
+        # Sanity: reject if too short/long or if AI said NONE.
+        if "NONE" in raw.upper():
+            return ""
+        if 2 <= len(digits) <= 5:
+            return digits
+        return ""
+    except Exception as e:
+        print(f"extract_seller_number failed: {type(e).__name__}: {e}", flush=True)
+        return ""
+
+
+async def extract_seller_number_from_sheet(sheet: UploadFile) -> str:
+    """Run extract_seller_number against an uploaded sheet (image or first PDF page).
+    Sheet's read cursor is consumed — do not call again on the same UploadFile.
+    """
+    data = await sheet.read()
+    if not data:
+        return ""
+    # Reset for any later reads.
+    try:
+        await sheet.seek(0)
+    except Exception:
+        pass
+    fname = (sheet.filename or "").lower()
+    ctype = (sheet.content_type or "").lower()
+    is_pdf = fname.endswith(".pdf") or ctype == "application/pdf"
+    if is_pdf:
+        pages = render_pdf_pages(data, dpi=180)
+        if not pages:
+            return ""
+        return await extract_seller_number(pages[0], "image/png")
+    else:
+        media_type = ctype if ctype.startswith("image/") else "image/jpeg"
+        return await extract_seller_number(data, media_type)
+
+
 @app.post("/api/jnj-build")
 async def jnj_build(files: List[UploadFile] = File(...)):
     """Analyze a JnJ sale intake.
@@ -1086,13 +1163,48 @@ async def _jnj_build_inner(files: List[UploadFile]) -> JSONResponse:
 async def jnj_build_sheet(sheet: UploadFile = File(...)):
     """Step 1 of the split flow: transcribe the sheet ONLY (fast, ~5–15s).
     Returns the parsed items so the client can immediately show them.
+
+    v20: ALSO extracts the hand-drawn boxed seller number from the top of
+    the sheet and returns it as `seller_number` — the client uses this to
+    fill in the Seller ID field automatically.
     """
     try:
-        transcript = await transcribe_uploaded_sheet(sheet)
+        # Read the sheet ONCE, then do transcription + seller-number extraction
+        # against the same bytes. transcribe_uploaded_sheet and
+        # extract_seller_number_from_sheet both call .read(), which would
+        # return empty on the second call. So we buffer the bytes ourselves.
+        raw = await sheet.read()
+        fname = (sheet.filename or "").lower()
+        ctype = (sheet.content_type or "").lower()
+        is_pdf = fname.endswith(".pdf") or ctype == "application/pdf"
+
+        async def _do_transcript():
+            if is_pdf:
+                pages = render_pdf_pages(raw, dpi=180)
+                non_blank = [pb for pb in pages if not is_blank_image(pb)]
+                if not non_blank:
+                    return ""
+                texts = await asyncio.gather(*[transcribe_image(pb, "image/png") for pb in non_blank])
+                return "\n".join(texts)
+            else:
+                media_type = ctype if ctype.startswith("image/") else "image/jpeg"
+                return await transcribe_image(raw, media_type)
+
+        async def _do_seller_num():
+            if is_pdf:
+                pages = render_pdf_pages(raw, dpi=180)
+                if not pages:
+                    return ""
+                return await extract_seller_number(pages[0], "image/png")
+            else:
+                media_type = ctype if ctype.startswith("image/") else "image/jpeg"
+                return await extract_seller_number(raw, media_type)
+
+        transcript, seller_number = await asyncio.gather(_do_transcript(), _do_seller_num())
         items = parse_items_from_transcript(transcript)
         if not items:
             raise HTTPException(400, f"Sheet transcribed but no item rows were parsed. Transcript: {transcript[:400]}")
-        return JSONResponse({"transcript": transcript, "items": items})
+        return JSONResponse({"transcript": transcript, "items": items, "seller_number": seller_number or ""})
     except HTTPException:
         raise
     except Exception as e:

@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-19-ai-neighbor-context-v19";
+const BUILD_ID = "2026-08-19-boxed-seller-num-v20";
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -991,7 +991,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v19 · ${BUILD_ID}`;
+  badge.textContent = `v20 · ${BUILD_ID}`;
   document.body.appendChild(badge);
 } catch {}
 
@@ -1128,7 +1128,19 @@ async function jnjHandleFiles(files) {
     const sheetData = await postForJson(JNJ_BUILD_SHEET_URL, sheetFd, "Sheet transcription");
     const items = sheetData.items || [];
     if (!items.length) throw new Error("Sheet transcribed but no item rows were parsed.");
-    statusEl.textContent = `sheet done — ${items.length} items. Matching ${photos.length} photos…`;
+
+    // v20: server may have detected a hand-drawn boxed seller number on the
+    // sheet (staff-use-only ID that has to be on every item's CSV row). If it
+    // found one, auto-fill the Seller ID field and remember the value so the
+    // next sheet doesn't overwrite it silently.
+    const detectedSellerNum = (sheetData.seller_number || "").trim();
+    if (detectedSellerNum) {
+      jnjSellerId.value = detectedSellerNum;
+      jnjSavePrefs();
+      toast(`Detected seller # ${detectedSellerNum} on the sheet — filled the Seller ID field.`);
+    }
+
+    statusEl.textContent = `sheet done — ${items.length} items${detectedSellerNum ? `, seller #${detectedSellerNum}` : ""}. Matching ${photos.length} photos…`;
 
     // ---------- Step 2: process photos in batches, in parallel ----------
     // Batch size 8 with concurrency 3 means we're running 24 photos through
