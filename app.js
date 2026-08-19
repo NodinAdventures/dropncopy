@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-19-parallel-transcribe-v3";
+const BUILD_ID = "2026-08-19-split-flow-and-folder-v4";
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -28,6 +28,14 @@ const CSV_EXPORT_URL = "__PORT_5000__".startsWith("__")
 const JNJ_BUILD_URL = "__PORT_5000__".startsWith("__")
   ? "/api/jnj-build"
   : "__PORT_5000__/api/jnj-build";
+const JNJ_BUILD_SHEET_URL = "__PORT_5000__".startsWith("__")
+  ? "/api/jnj-build-sheet"
+  : "__PORT_5000__/api/jnj-build-sheet";
+const JNJ_MATCH_PHOTOS_URL = "__PORT_5000__".startsWith("__")
+  ? "/api/jnj-match-photos"
+  : "__PORT_5000__/api/jnj-match-photos";
+// Batch size: keep each photo POST under Render's ~30s proxy timeout.
+const JNJ_PHOTO_BATCH_SIZE = 6;
 const JNJ_REMATCH_URL = "__PORT_5000__".startsWith("__")
   ? "/api/jnj-rematch"
   : "__PORT_5000__/api/jnj-rematch";
@@ -710,12 +718,30 @@ function jnjSavePrefs() {
 
 const jnjSheetInput = document.getElementById("jnjSheetInput");
 const jnjPhotosInput = document.getElementById("jnjPhotosInput");
+const jnjPhotosFolderInput = document.getElementById("jnjPhotosFolderInput");
 const jnjAddSheetBtn = document.getElementById("jnjAddSheetBtn");
 const jnjAddPhotosBtn = document.getElementById("jnjAddPhotosBtn");
+const jnjAddPhotoFolderBtn = document.getElementById("jnjAddPhotoFolderBtn");
 const jnjBuildBtn = document.getElementById("jnjBuildBtn");
 const jnjClearStagedBtn = document.getElementById("jnjClearStagedBtn");
 const jnjStagedList = document.getElementById("jnjStagedList");
 const jnjStageActions = document.getElementById("jnjStageActions");
+
+// Keep only real image files. Drops:
+//   - zero-byte entries (Windows "folder" drops)
+//   - dotfiles and macOS .DS_Store / Thumbs.db
+//   - non-image mime types (PDFs are handled separately as the sheet)
+function isUsablePhoto(f) {
+  if (!f) return false;
+  if (!f.size || f.size <= 0) return false;
+  const name = (f.name || "").toLowerCase();
+  if (name.startsWith(".")) return false;
+  if (name === "thumbs.db" || name === "desktop.ini") return false;
+  const type = (f.type || "").toLowerCase();
+  if (type.startsWith("image/")) return true;
+  // Fallback for files with no mime type — check extension
+  return /\.(jpe?g|png|heic|heif|webp|gif|bmp|tiff?)$/i.test(name);
+}
 
 // Staged files live here until the user taps Build.
 let jnjStaged = { sheet: null, photos: [] };
@@ -783,6 +809,12 @@ jnjAddPhotosBtn.addEventListener("click", (e) => {
   e.preventDefault();
   jnjPhotosInput.click();
 });
+if (jnjAddPhotoFolderBtn) {
+  jnjAddPhotoFolderBtn.addEventListener("click", (e) => {
+    e.preventDefault();
+    jnjPhotosFolderInput.click();
+  });
+}
 
 jnjSheetInput.addEventListener("change", (e) => {
   const f = e.target.files && e.target.files[0];
@@ -793,17 +825,33 @@ jnjSheetInput.addEventListener("change", (e) => {
   jnjSheetInput.value = "";
 });
 
-jnjPhotosInput.addEventListener("change", (e) => {
-  const files = Array.from(e.target.files || []);
-  for (const f of files) {
+function jnjIngestPhotos(fileList) {
+  const raw = Array.from(fileList || []);
+  const kept = raw.filter(isUsablePhoto);
+  const dropped = raw.length - kept.length;
+  for (const f of kept) {
     // Avoid duplicates by name+size
     if (!jnjStaged.photos.some(p => p.name === f.name && p.size === f.size)) {
       jnjStaged.photos.push(f);
     }
   }
   jnjRenderStaged();
+  if (dropped > 0) {
+    toast(`Added ${kept.length} photos (skipped ${dropped} non-image or empty file${dropped === 1 ? "" : "s"}).`);
+  }
+}
+
+jnjPhotosInput.addEventListener("change", (e) => {
+  jnjIngestPhotos(e.target.files);
   jnjPhotosInput.value = "";
 });
+
+if (jnjPhotosFolderInput) {
+  jnjPhotosFolderInput.addEventListener("change", (e) => {
+    jnjIngestPhotos(e.target.files);
+    jnjPhotosFolderInput.value = "";
+  });
+}
 
 jnjClearStagedBtn.addEventListener("click", () => {
   jnjStaged = { sheet: null, photos: [] };
@@ -832,23 +880,58 @@ jnjBuildBtn.addEventListener("click", () => {
     jnjDropZone.classList.remove("drag-over");
   })
 );
-jnjDropZone.addEventListener("drop", (e) => {
+// Recursively walk a dropped folder via FileSystemEntry API.
+async function walkEntry(entry, out) {
+  if (!entry) return;
+  if (entry.isFile) {
+    await new Promise((res) => entry.file((f) => { out.push(f); res(); }, () => res()));
+  } else if (entry.isDirectory) {
+    const reader = entry.createReader();
+    // readEntries returns in batches — keep reading until empty.
+    while (true) {
+      const batch = await new Promise((res) => reader.readEntries((ents) => res(ents), () => res([])));
+      if (!batch.length) break;
+      for (const child of batch) await walkEntry(child, out);
+    }
+  }
+}
+
+jnjDropZone.addEventListener("drop", async (e) => {
   if (e.dataTransfer.types.includes("application/x-jnj-photo")) return;
-  const files = Array.from(e.dataTransfer.files || []);
+
+  // Try FileSystemEntry path first — this expands dropped folders.
+  const items = e.dataTransfer.items ? Array.from(e.dataTransfer.items) : [];
+  const collected = [];
+  let usedEntryApi = false;
+  for (const it of items) {
+    if (it.kind !== "file") continue;
+    const entry = it.webkitGetAsEntry && it.webkitGetAsEntry();
+    if (entry) {
+      usedEntryApi = true;
+      await walkEntry(entry, collected);
+    }
+  }
+  const files = usedEntryApi ? collected : Array.from(e.dataTransfer.files || []);
   if (!files.length) return;
+
+  let droppedCount = 0;
   for (const f of files) {
     const name = (f.name || "").toLowerCase();
     const isPdf = name.endsWith(".pdf") || f.type === "application/pdf";
     if (isPdf && !jnjStaged.sheet) {
       jnjStaged.sheet = f;
-    } else {
-      // Not a PDF, or sheet slot already filled — add to photos (skip dupes).
+    } else if (isUsablePhoto(f)) {
       if (!jnjStaged.photos.some(p => p.name === f.name && p.size === f.size)) {
         jnjStaged.photos.push(f);
       }
+    } else {
+      droppedCount++;
     }
   }
   jnjRenderStaged();
+  if (droppedCount > 0) {
+    toast(`Skipped ${droppedCount} non-image or empty file${droppedCount === 1 ? "" : "s"}.`);
+  }
 });
 
 // Fallback legacy input — keep for anything still referencing jnjFileInput.
@@ -881,6 +964,34 @@ try {
   }
 } catch {}
 
+// POST wrapper that returns parsed JSON, throws a clean Error on non-2xx.
+async function postForJson(url, formData, contextLabel) {
+  let res;
+  try {
+    res = await fetch(url, { method: "POST", body: formData });
+  } catch (netErr) {
+    // "Failed to fetch" — usually a proxy timeout (502) or network drop.
+    throw new Error(`${contextLabel}: network error (${netErr.message || "connection lost"}). This usually means the server took too long. Try again — photos are processed in batches so a retry only redoes the failed batch.`);
+  }
+  if (!res.ok) {
+    let msg = `${contextLabel}: server error (${res.status})`;
+    let bodyText = "";
+    try {
+      bodyText = await res.text();
+      try { const j = JSON.parse(bodyText); msg = `${contextLabel}: ${j.detail || j.error || msg}`; }
+      catch { if (bodyText) msg = `${contextLabel}: ${bodyText.slice(0, 400)}`; }
+    } catch {}
+    console.error(`${contextLabel} failed:`, res.status, bodyText);
+    throw new Error(msg);
+  }
+  try {
+    return await res.json();
+  } catch (parseErr) {
+    console.error(`${contextLabel}: non-JSON response`, parseErr);
+    throw new Error(`${contextLabel}: server returned an invalid response.`);
+  }
+}
+
 async function jnjHandleFiles(files) {
   if (!files.length) return;
   if (files.length < 2) {
@@ -888,49 +999,85 @@ async function jnjHandleFiles(files) {
     return;
   }
 
-  // Restore last-used pref values into the fields on first use
+  // Separate sheet from photos on the client (server used to do this, but we
+  // now call two separate endpoints so we split here).
+  let sheet = null;
+  const photos = [];
+  for (const f of files) {
+    const name = (f.name || "").toLowerCase();
+    const isPdf = name.endsWith(".pdf") || f.type === "application/pdf";
+    if (isPdf && !sheet) sheet = f;
+    else photos.push(f);
+  }
+  // If no PDF, fall back to filename hints (any "sheet"/"intake"/"file*" image).
+  if (!sheet) {
+    for (let i = 0; i < photos.length; i++) {
+      const n = (photos[i].name || "").toLowerCase();
+      if (/(sheet|intake)/.test(n) || n.startsWith("file")) {
+        sheet = photos.splice(i, 1)[0];
+        break;
+      }
+    }
+  }
+  // Last-resort: use the smallest file as the sheet (single-page PDFs are ~200KB,
+  // item photos from phones are 2–4MB).
+  if (!sheet && photos.length > 1) {
+    photos.sort((a, b) => a.size - b.size);
+    sheet = photos.shift();
+  }
+  if (!sheet) {
+    jnjShowErrorBanner("Couldn't identify a sheet in the upload. Please add the intake sheet as a PDF or a clear photo.");
+    return;
+  }
+
   jnjRestorePrefs();
 
-  // Show a simple processing indicator by hijacking the shared tray
   processingTray.classList.remove("hidden");
   processingList.innerHTML = "";
   const li = document.createElement("li");
-  li.innerHTML = `<span class="spinner"></span><span class="name">JnJ Sale Builder</span><span class="status">reading sheet + matching photos… this can take 1–2 min for 20+ photos</span>`;
+  li.innerHTML = `<span class="spinner"></span><span class="name">JnJ Sale Builder</span><span class="status">reading sheet…</span>`;
   processingList.appendChild(li);
   const statusEl = li.querySelector(".status");
 
   try {
-    const fd = new FormData();
-    for (const f of files) fd.append("files", f);
-    const res = await fetch(JNJ_BUILD_URL, { method: "POST", body: fd });
-    if (!res.ok) {
-      let msg = `server error (${res.status})`;
-      let bodyText = "";
-      try {
-        bodyText = await res.text();
-        try { const j = JSON.parse(bodyText); msg = j.detail || j.error || msg; }
-        catch { if (bodyText) msg = bodyText.slice(0, 500); }
-      } catch {}
-      console.error("JnJ build failed:", res.status, bodyText);
-      throw new Error(msg);
+    // ---------- Step 1: transcribe the sheet ----------
+    statusEl.textContent = "reading sheet…";
+    const sheetFd = new FormData();
+    sheetFd.append("sheet", sheet);
+    const sheetData = await postForJson(JNJ_BUILD_SHEET_URL, sheetFd, "Sheet transcription");
+    const items = sheetData.items || [];
+    if (!items.length) throw new Error("Sheet transcribed but no item rows were parsed.");
+    statusEl.textContent = `sheet done — ${items.length} items. Matching ${photos.length} photos…`;
+
+    // ---------- Step 2: process photos in batches ----------
+    const batches = [];
+    for (let i = 0; i < photos.length; i += JNJ_PHOTO_BATCH_SIZE) {
+      batches.push(photos.slice(i, i + JNJ_PHOTO_BATCH_SIZE));
     }
-    let data;
-    try {
-      data = await res.json();
-    } catch (parseErr) {
-      console.error("JnJ build: server returned non-JSON", parseErr);
-      throw new Error("Server returned an invalid response. Check the logs on Render.");
+    const itemsJson = JSON.stringify(items);
+    const allPhotoInfos = [];
+    for (let b = 0; b < batches.length; b++) {
+      statusEl.textContent = `matching photos… batch ${b + 1} of ${batches.length}`;
+      const fd = new FormData();
+      for (const p of batches[b]) fd.append("photos", p);
+      fd.append("items_json", itemsJson);
+      const batchData = await postForJson(JNJ_MATCH_PHOTOS_URL, fd, `Photo batch ${b + 1}/${batches.length}`);
+      // Re-index ids so they stay unique across batches.
+      for (const p of batchData.photos || []) {
+        p.id = `p${allPhotoInfos.length}`;
+        allPhotoInfos.push(p);
+      }
     }
-    statusEl.textContent = `done — ${data.items.length} items, ${data.photos.length} photos`;
+
+    statusEl.textContent = `done — ${items.length} items, ${allPhotoInfos.length} photos`;
     li.querySelector(".spinner").outerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color: var(--success); flex-shrink:0;"><polyline points="20 6 9 17 4 12"/></svg>`;
     setTimeout(() => { processingList.innerHTML = ""; processingTray.classList.add("hidden"); }, 2500);
 
-    // Match the returned photo filenames to the actual File objects we still hold
-    const photoMap = new Map();
-    // Build a filename lookup among the uploaded files
+    // Wire everything back into local state so the preview UI can render it.
     const filesByName = new Map();
-    for (const f of files) filesByName.set(f.name, f);
-    for (const p of data.photos) {
+    for (const f of [sheet, ...photos]) filesByName.set(f.name, f);
+    const photoMap = new Map();
+    for (const p of allPhotoInfos) {
       photoMap.set(p.filename, {
         id: p.id,
         file: filesByName.get(p.filename) || null,
@@ -941,11 +1088,9 @@ async function jnjHandleFiles(files) {
         match_kind: p.match_kind,
       });
     }
-
-    // Build item→photos and unmatched lists
     const itemPhotos = {};
     const unmatched = [];
-    for (const it of data.items) itemPhotos[it.item_num] = [];
+    for (const it of items) itemPhotos[it.item_num] = [];
     for (const [fname, info] of photoMap) {
       if (info.item_num_match && itemPhotos[info.item_num_match]) {
         itemPhotos[info.item_num_match].push(fname);
@@ -954,15 +1099,13 @@ async function jnjHandleFiles(files) {
       }
     }
 
-    jnjState = { items: data.items, photos: photoMap, itemPhotos, unmatched };
+    jnjState = { items, photos: photoMap, itemPhotos, unmatched };
     jnjRenderPreview();
   } catch (err) {
     console.error("JnJ build error:", err);
     statusEl.textContent = err.message || "failed";
     li.classList.add("error");
     li.querySelector(".spinner").outerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color: var(--danger); flex-shrink:0;"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>`;
-    // DO NOT auto-hide errors — user needs to see what went wrong.
-    // Also show a big persistent banner so it can't be missed on mobile.
     jnjShowErrorBanner(err.message || "Something went wrong. Please try again.");
   }
 }

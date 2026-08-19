@@ -85,6 +85,7 @@
           <input id="jnjFileInput" type="file" multiple accept=".pdf,image/*" hidden />
           <input id="jnjSheetInput" type="file" accept=".pdf,image/*" hidden />
           <input id="jnjPhotosInput" type="file" multiple accept="image/*" hidden />
+          <input id="jnjPhotosFolderInput" type="file" multiple webkitdirectory hidden />
           <div class="dropzone-inner" id="jnjDropInner">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <rect x="3" y="3" width="7" height="7" rx="1" />
@@ -97,6 +98,7 @@
             <div class="jnj-stage-buttons" style="display:flex;gap:10px;flex-wrap:wrap;justify-content:center;">
               <button type="button" id="jnjAddSheetBtn" class="action-btn ghost" style="padding:10px 16px;">1. Add sheet (PDF or photo)</button>
               <button type="button" id="jnjAddPhotosBtn" class="action-btn ghost" style="padding:10px 16px;">2. Add item photos</button>
+              <button type="button" id="jnjAddPhotoFolderBtn" class="action-btn ghost" style="padding:10px 16px;" title="Desktop only">or pick a folder</button>
             </div>
           </div>
           <div id="jnjStagedList" class="jnj-staged-list" style="display:none;margin-top:14px;"></div>

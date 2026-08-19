@@ -1078,6 +1078,96 @@ async def _jnj_build_inner(files: List[UploadFile]) -> JSONResponse:
     })
 
 
+@app.post("/api/jnj-build-sheet")
+async def jnj_build_sheet(sheet: UploadFile = File(...)):
+    """Step 1 of the split flow: transcribe the sheet ONLY (fast, ~5–15s).
+    Returns the parsed items so the client can immediately show them.
+    """
+    try:
+        transcript = await transcribe_uploaded_sheet(sheet)
+        items = parse_items_from_transcript(transcript)
+        if not items:
+            raise HTTPException(400, f"Sheet transcribed but no item rows were parsed. Transcript: {transcript[:400]}")
+        return JSONResponse({"transcript": transcript, "items": items})
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        print(f"JNJ-BUILD-SHEET FATAL: {e}\n{traceback.format_exc()}", flush=True)
+        raise HTTPException(500, f"{type(e).__name__}: {str(e)[:400]}")
+
+
+@app.post("/api/jnj-match-photos")
+async def jnj_match_photos(
+    photos: List[UploadFile] = File(...),
+    items_json: str = Form(...),
+):
+    """Step 2 of the split flow: process a BATCH of photos against a known
+    items list. Kept small enough (<= ~8 photos) to finish under 30s on
+    Render's default proxy timeout. Can be called multiple times.
+    """
+    try:
+        items = json.loads(items_json)
+        if not isinstance(items, list) or not items:
+            raise HTTPException(400, "items_json must be a non-empty list.")
+
+        async def process_photo(idx: int, photo: UploadFile) -> Dict:
+            raw = await photo.read()
+            try:
+                img = Image.open(io.BytesIO(raw))
+                img = img.convert("RGB")
+                img.thumbnail((200, 200))
+                tbuf = io.BytesIO()
+                img.save(tbuf, format="JPEG", quality=75)
+                thumb_b64 = base64.standard_b64encode(tbuf.getvalue()).decode("utf-8")
+                thumb_data_url = f"data:image/jpeg;base64,{thumb_b64}"
+            except Exception:
+                thumb_data_url = ""
+            media_type = photo.content_type or "image/jpeg"
+            if not media_type.startswith("image/"):
+                media_type = "image/jpeg"
+            read = await read_photo_tag(raw, media_type)
+            return {
+                "id": f"p{idx}",
+                "filename": photo.filename or f"photo_{idx}.jpg",
+                "thumb_data_url": thumb_data_url,
+                "tag_read": read.get("tag", ""),
+                "description_read": read.get("description", ""),
+            }
+
+        photo_infos = await asyncio.gather(*[process_photo(i, p) for i, p in enumerate(photos)])
+        valid_items = {i["item_num"] for i in items}
+
+        for p in photo_infos:
+            tag = p.get("tag_read", "")
+            if tag and tag in valid_items:
+                p["item_num_match"] = tag
+                p["match_kind"] = "tag"
+            else:
+                p["item_num_match"] = ""
+                p["match_kind"] = "none"
+
+        async def desc_match(p):
+            if p["match_kind"] != "none":
+                return
+            desc = p.get("description_read", "")
+            if not desc:
+                return
+            matched = await match_photo_by_description(desc, items)
+            if matched:
+                p["item_num_match"] = matched
+                p["match_kind"] = "desc"
+
+        await asyncio.gather(*[desc_match(p) for p in photo_infos])
+        return JSONResponse({"photos": photo_infos})
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        print(f"JNJ-MATCH-PHOTOS FATAL: {e}\n{traceback.format_exc()}", flush=True)
+        raise HTTPException(500, f"{type(e).__name__}: {str(e)[:400]}")
+
+
 @app.get("/api/jnj-diag")
 async def jnj_diag():
     """Quick health check to verify the JnJ endpoint is reachable and the
