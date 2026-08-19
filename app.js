@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-19-folder-drop-fix-v11";
+const BUILD_ID = "2026-08-19-parallel-batches-v12";
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -37,7 +37,8 @@ const JNJ_MATCH_PHOTOS_URL = "__PORT_5000__".startsWith("__")
 // Batch size: keep each photo POST under Render's ~30s proxy timeout AND
 // under the 512MB RAM cap on Free tier. 3 photos = ~15–20s per batch,
 // well within limits.
-const JNJ_PHOTO_BATCH_SIZE = 3;
+const JNJ_PHOTO_BATCH_SIZE = 8;
+const JNJ_PHOTO_CONCURRENCY = 3; // Number of batches to run in parallel.
 const JNJ_REMATCH_URL = "__PORT_5000__".startsWith("__")
   ? "/api/jnj-rematch"
   : "__PORT_5000__/api/jnj-rematch";
@@ -989,7 +990,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v11 · ${BUILD_ID}`;
+  badge.textContent = `v12 · ${BUILD_ID}`;
   document.body.appendChild(badge);
 } catch {}
 
@@ -1128,21 +1129,50 @@ async function jnjHandleFiles(files) {
     if (!items.length) throw new Error("Sheet transcribed but no item rows were parsed.");
     statusEl.textContent = `sheet done — ${items.length} items. Matching ${photos.length} photos…`;
 
-    // ---------- Step 2: process photos in batches ----------
+    // ---------- Step 2: process photos in batches, in parallel ----------
+    // Batch size 8 with concurrency 3 means we're running 24 photos through
+    // OpenAI simultaneously, which is well under any rate limit and dramatically
+    // faster than the old sequential 3-at-a-time approach.
     const batches = [];
     for (let i = 0; i < photos.length; i += JNJ_PHOTO_BATCH_SIZE) {
       batches.push(photos.slice(i, i + JNJ_PHOTO_BATCH_SIZE));
     }
     const itemsJson = JSON.stringify(items);
-    const allPhotoInfos = [];
-    for (let b = 0; b < batches.length; b++) {
-      statusEl.textContent = `matching photos… batch ${b + 1} of ${batches.length}`;
+    const results = new Array(batches.length); // Store by index to preserve order.
+    let completedBatches = 0;
+
+    const runBatch = async (batchIdx) => {
       const fd = new FormData();
-      for (const p of batches[b]) fd.append("photos", p);
+      for (const p of batches[batchIdx]) fd.append("photos", p);
       fd.append("items_json", itemsJson);
-      const batchData = await postForJson(JNJ_MATCH_PHOTOS_URL, fd, `Photo batch ${b + 1}/${batches.length}`);
-      // Re-index ids so they stay unique across batches.
-      for (const p of batchData.photos || []) {
+      const batchData = await postForJson(JNJ_MATCH_PHOTOS_URL, fd, `Photo batch ${batchIdx + 1}/${batches.length}`);
+      results[batchIdx] = batchData.photos || [];
+      completedBatches++;
+      statusEl.textContent = `matching photos… ${completedBatches} of ${batches.length} batches done`;
+    };
+
+    // Run batches with a concurrency limit — keeps at most JNJ_PHOTO_CONCURRENCY
+    // requests in flight at any time. Simpler than a full pool implementation:
+    // we start N workers that each pull the next available batch index.
+    let nextBatch = 0;
+    const worker = async () => {
+      while (true) {
+        const idx = nextBatch++;
+        if (idx >= batches.length) return;
+        await runBatch(idx);
+      }
+    };
+    const workers = [];
+    for (let w = 0; w < Math.min(JNJ_PHOTO_CONCURRENCY, batches.length); w++) {
+      workers.push(worker());
+    }
+    await Promise.all(workers);
+
+    // Flatten results in the original batch order and re-index photo ids.
+    const allPhotoInfos = [];
+    for (const batchResults of results) {
+      if (!batchResults) continue;
+      for (const p of batchResults) {
         p.id = `p${allPhotoInfos.length}`;
         allPhotoInfos.push(p);
       }

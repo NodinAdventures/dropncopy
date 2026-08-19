@@ -1226,15 +1226,18 @@ async def jnj_match_photos(
         # Each photo is wrapped in its own try/except so a single bad photo
         # can't take down the entire batch (which is what caused the SIGABRT
         # crash we saw in v9 — status 134 = native library abort).
-        photo_infos: List[Dict] = []
-        for i, p in enumerate(photos):
+        #
+        # v12: photos in a batch run CONCURRENTLY via asyncio.gather since each
+        # is waiting on network I/O (OpenAI vision call ~2-3s). Sequential
+        # processing meant a batch of 8 took 8 * 3s = 24s; concurrent means the
+        # slowest photo dominates (~4s). return_exceptions keeps one failure
+        # from taking down the batch.
+        async def safe_process(i: int, p: UploadFile) -> Dict:
             try:
-                photo_infos.append(await process_photo(i, p))
+                return await process_photo(i, p)
             except Exception as e:
                 print(f"process_photo failed for photo {i} ({getattr(p,'filename','?')}): {type(e).__name__}: {e}", flush=True)
-                # Return a stub so the client still sees this photo (unmatched)
-                # rather than losing it entirely.
-                photo_infos.append({
+                return {
                     "id": f"p{i}",
                     "filename": getattr(p, "filename", f"photo_{i}.jpg") or f"photo_{i}.jpg",
                     "thumb_data_url": "",
@@ -1242,7 +1245,14 @@ async def jnj_match_photos(
                     "description_read": "",
                     "dhash": "",
                     "error": f"{type(e).__name__}: {str(e)[:200]}",
-                })
+                }
+
+        # Fire all photos in this batch concurrently. Each is I/O bound (waiting
+        # on OpenAI), so this collapses an 8-photo batch from ~24s to ~4s.
+        photo_infos: List[Dict] = await asyncio.gather(
+            *[safe_process(i, p) for i, p in enumerate(photos)]
+        )
+
         valid_items = {i["item_num"] for i in items}
 
         for p in photo_infos:
