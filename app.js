@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-19-memory-safe-v5";
+const BUILD_ID = "2026-08-19-order-match-v7";
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -720,10 +720,8 @@ function jnjSavePrefs() {
 
 const jnjSheetInput = document.getElementById("jnjSheetInput");
 const jnjPhotosInput = document.getElementById("jnjPhotosInput");
-const jnjPhotosFolderInput = document.getElementById("jnjPhotosFolderInput");
 const jnjAddSheetBtn = document.getElementById("jnjAddSheetBtn");
 const jnjAddPhotosBtn = document.getElementById("jnjAddPhotosBtn");
-const jnjAddPhotoFolderBtn = document.getElementById("jnjAddPhotoFolderBtn");
 const jnjBuildBtn = document.getElementById("jnjBuildBtn");
 const jnjClearStagedBtn = document.getElementById("jnjClearStagedBtn");
 const jnjStagedList = document.getElementById("jnjStagedList");
@@ -811,12 +809,6 @@ jnjAddPhotosBtn.addEventListener("click", (e) => {
   e.preventDefault();
   jnjPhotosInput.click();
 });
-if (jnjAddPhotoFolderBtn) {
-  jnjAddPhotoFolderBtn.addEventListener("click", (e) => {
-    e.preventDefault();
-    jnjPhotosFolderInput.click();
-  });
-}
 
 jnjSheetInput.addEventListener("change", (e) => {
   const f = e.target.files && e.target.files[0];
@@ -847,13 +839,6 @@ jnjPhotosInput.addEventListener("change", (e) => {
   jnjIngestPhotos(e.target.files);
   jnjPhotosInput.value = "";
 });
-
-if (jnjPhotosFolderInput) {
-  jnjPhotosFolderInput.addEventListener("change", (e) => {
-    jnjIngestPhotos(e.target.files);
-    jnjPhotosFolderInput.value = "";
-  });
-}
 
 jnjClearStagedBtn.addEventListener("click", () => {
   jnjStaged = { sheet: null, photos: [] };
@@ -1125,6 +1110,80 @@ async function jnjHandleFiles(files) {
     li.querySelector(".spinner").outerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color: var(--success); flex-shrink:0;"><polyline points="20 6 9 17 4 12"/></svg>`;
     setTimeout(() => { processingList.innerHTML = ""; processingTray.classList.add("hidden"); }, 2500);
 
+    // ---------- Step 3: order-based fill (proportional distribution) ----------
+    // Dave takes photos in sheet order with 1+ photos per item. Tags always
+    // win when readable, and act as "anchors" that split the photo stream into
+    // segments. Within each segment we distribute photos proportionally across
+    // the items in that range.
+    //
+    // Verified with 6 scenarios (see test_order_match.py):
+    //   - 5 photos / 5 items no tags   → perfect 1:1
+    //   - 9 photos / 5 items no tags   → 2/2/2/2/1 distribution
+    //   - mixed with tag anchors        → tags at correct items, fills between
+    //   - every photo tagged            → pure tag match, no order needed
+    //   - 6 photos / 3 items no tags   → 2/2/2 distribution
+    //   - 3 photos / 5 items no tags   → spread evenly across the 5 items
+    const itemNumByIndex = items.map(i => i.item_num);
+    const indexByItemNum = new Map(items.map((i, idx) => [i.item_num, idx]));
+
+    // Find tag anchors: (photoIndex, itemIndex) pairs.
+    const anchors = [];
+    for (let pi = 0; pi < allPhotoInfos.length; pi++) {
+      const p = allPhotoInfos[pi];
+      if (p.match_kind === "tag" && indexByItemNum.has(p.item_num_match)) {
+        anchors.push([pi, indexByItemNum.get(p.item_num_match)]);
+      }
+    }
+
+    // Build segments between anchors (with virtual bounds at start/end).
+    const segments = [];
+    let prevPhotoIdx = -1;
+    let prevItemIdx = 0;
+    for (const [ap, ai] of anchors) {
+      segments.push({
+        photoStart: prevPhotoIdx + 1,
+        photoEnd: ap,          // exclusive
+        itemStart: prevItemIdx,
+        itemEnd: ai,           // exclusive
+      });
+      prevPhotoIdx = ap;
+      prevItemIdx = ai;        // next segment can still start at this item
+    }
+    segments.push({
+      photoStart: prevPhotoIdx + 1,
+      photoEnd: allPhotoInfos.length,
+      itemStart: prevItemIdx,
+      itemEnd: items.length,
+    });
+
+    for (const seg of segments) {
+      const nPhotos = seg.photoEnd - seg.photoStart;
+      const nItems = seg.itemEnd - seg.itemStart;
+      if (nPhotos <= 0) continue;
+      if (nItems <= 0) {
+        // No items left in range — dump into last item of segment.
+        const targetIdx = Math.min(seg.itemStart, items.length - 1);
+        for (let pi = seg.photoStart; pi < seg.photoEnd; pi++) {
+          const p = allPhotoInfos[pi];
+          if (p.match_kind === "none") {
+            p.item_num_match = itemNumByIndex[targetIdx] || "";
+            p.match_kind = p.item_num_match ? "order" : "none";
+          }
+        }
+        continue;
+      }
+      // Proportional: photo j in segment → items[itemStart + floor(j * nItems / nPhotos)]
+      for (let j = 0; j < nPhotos; j++) {
+        const pi = seg.photoStart + j;
+        const p = allPhotoInfos[pi];
+        if (p.match_kind !== "none") continue;
+        let targetIdx = seg.itemStart + Math.floor(j * nItems / nPhotos);
+        if (targetIdx >= items.length) targetIdx = items.length - 1;
+        p.item_num_match = itemNumByIndex[targetIdx] || "";
+        p.match_kind = p.item_num_match ? "order" : "none";
+      }
+    }
+
     // Wire everything back into local state so the preview UI can render it.
     const filesByName = new Map();
     for (const f of [sheet, ...photos]) filesByName.set(f.name, f);
@@ -1143,11 +1202,15 @@ async function jnjHandleFiles(files) {
     const itemPhotos = {};
     const unmatched = [];
     for (const it of items) itemPhotos[it.item_num] = [];
-    for (const [fname, info] of photoMap) {
+    // Iterate in original upload order so the item-cards list photos in the
+    // sequence Dave took them.
+    for (const p of allPhotoInfos) {
+      const info = photoMap.get(p.filename);
+      if (!info) continue;
       if (info.item_num_match && itemPhotos[info.item_num_match]) {
-        itemPhotos[info.item_num_match].push(fname);
+        itemPhotos[info.item_num_match].push(p.filename);
       } else {
-        unmatched.push(fname);
+        unmatched.push(p.filename);
       }
     }
 
@@ -1210,7 +1273,7 @@ function jnjRenderPreview() {
     if (photos.length) {
       const firstInfo = jnjState.photos.get(photos[0]);
       const kind = firstInfo ? firstInfo.match_kind : "none";
-      const label = { tag: "TAG", desc: "DESC", manual: "MANUAL", none: "" }[kind] || "";
+      const label = { tag: "TAG", desc: "DESC", order: "ORDER", manual: "MANUAL", none: "" }[kind] || "";
       if (label) badgeHtml = `<span class="jnj-match-badge ${kind}">${label}</span>`;
     }
 

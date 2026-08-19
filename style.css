@@ -1070,6 +1070,7 @@ body {
 }
 .jnj-match-badge.tag { background: #dcfce7; color: #166534; }
 .jnj-match-badge.desc { background: #fef3c7; color: #92400e; }
+.jnj-match-badge.order { background: #e0e7ff; color: #3730a3; }
 .jnj-match-badge.manual { background: #dbeafe; color: #1e40af; }
 .jnj-match-badge.none { background: #fee2e2; color: #991b1b; }
 
