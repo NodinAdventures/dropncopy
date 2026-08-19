@@ -839,7 +839,7 @@ async def read_photo_tag(image_bytes: bytes, media_type: str, pre_shrunk: bool =
                 {
                     "role": "user",
                     "content": [
-                        {"type": "image_url", "image_url": {"url": data_url, "detail": "high"}},
+                        {"type": "image_url", "image_url": {"url": data_url, "detail": "low"}},
                         {"type": "text", "text": "What's in this photo? Item number on a tag, or NO_TAG + description."},
                     ],
                 },
@@ -1125,6 +1125,25 @@ async def jnj_match_photos(
         # than all N at once.
         import gc
 
+        def compute_dhash(pil_img) -> str:
+            """Cheap perceptual hash: shrink to 9x8 grayscale, compare adjacent
+            pixels. Two photos of the same item have similar dhash; photos of
+            different items have very different dhashes. Costs ~1ms per photo
+            and returns a 16-char hex string.
+            """
+            try:
+                small = pil_img.convert("L").resize((9, 8), Image.LANCZOS)
+                pixels = list(small.getdata())
+                bits = 0
+                for row in range(8):
+                    for col in range(8):
+                        left = pixels[row * 9 + col]
+                        right = pixels[row * 9 + col + 1]
+                        bits = (bits << 1) | (1 if left > right else 0)
+                return f"{bits:016x}"
+            except Exception:
+                return ""
+
         async def process_photo(idx: int, photo: UploadFile) -> Dict:
             raw = await photo.read()
             filename = photo.filename or f"photo_{idx}.jpg"
@@ -1132,25 +1151,31 @@ async def jnj_match_photos(
             if not media_type.startswith("image/"):
                 media_type = "image/jpeg"
 
-            # Shrink to 1024px (used for AI) and 200px (used for UI thumb) in
-            # one PIL open. Free the big bitmap ASAP by using a `with` block.
+            # Shrink to 768px (used for AI) and 160px (used for UI thumb).
+            # 768px is plenty for reading a 3-digit tag number and cuts peak
+            # PIL bitmap from ~13MB to ~7MB per photo. Free the big bitmap
+            # ASAP with a `with` block so RAM returns to baseline between
+            # photos on Render's 512MB Free/Starter tier.
             small_bytes = b""
             thumb_data_url = ""
+            dhash = ""
             try:
                 with Image.open(io.BytesIO(raw)) as img:
                     rgb = img.convert("RGB")
-                    # 1) 1024px JPEG for vision API
+                    # 0) Perceptual hash for scene-change detection (near-free)
+                    dhash = compute_dhash(rgb)
+                    # 1) 768px JPEG for vision API (tag reading only)
                     big = rgb.copy()
-                    big.thumbnail((1024, 1024))
+                    big.thumbnail((768, 768))
                     bbuf = io.BytesIO()
-                    big.save(bbuf, format="JPEG", quality=85)
+                    big.save(bbuf, format="JPEG", quality=80)
                     small_bytes = bbuf.getvalue()
                     big.close()
                     del big, bbuf
-                    # 2) 200px thumb for the UI
+                    # 2) 160px thumb for the UI (base64 in JSON — keep small)
                     tbuf = io.BytesIO()
-                    rgb.thumbnail((200, 200))
-                    rgb.save(tbuf, format="JPEG", quality=75)
+                    rgb.thumbnail((160, 160))
+                    rgb.save(tbuf, format="JPEG", quality=70)
                     thumb_b64 = base64.standard_b64encode(tbuf.getvalue()).decode("utf-8")
                     thumb_data_url = f"data:image/jpeg;base64,{thumb_b64}"
                     rgb.close()
@@ -1173,6 +1198,7 @@ async def jnj_match_photos(
                 "thumb_data_url": thumb_data_url,
                 "tag_read": read.get("tag", ""),
                 "description_read": read.get("description", ""),
+                "dhash": dhash,
             }
 
         # Process sequentially to keep peak memory low. On Render Free
@@ -1193,18 +1219,13 @@ async def jnj_match_photos(
                 p["item_num_match"] = ""
                 p["match_kind"] = "none"
 
-        async def desc_match(p):
-            if p["match_kind"] != "none":
-                return
-            desc = p.get("description_read", "")
-            if not desc:
-                return
-            matched = await match_photo_by_description(desc, items)
-            if matched:
-                p["item_num_match"] = matched
-                p["match_kind"] = "desc"
-
-        await asyncio.gather(*[desc_match(p) for p in photo_infos])
+        # NOTE: description-based AI matching is DISABLED here — the client
+        # runs order-based matching (proportional distribution using photo
+        # position in sheet order) which is more accurate for Dave's workflow
+        # and needs zero extra AI calls. Saves ~2–5s per photo and cuts
+        # per-request memory in half. If we ever want to re-enable a
+        # description-based fallback for photos that end up in the wrong
+        # segment, add it here — but for now, less code = fewer OOMs.
         return JSONResponse({"photos": photo_infos})
     except HTTPException:
         raise

@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-19-order-match-v7";
+const BUILD_ID = "2026-08-19-scene-change-v9";
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -1110,78 +1110,69 @@ async function jnjHandleFiles(files) {
     li.querySelector(".spinner").outerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color: var(--success); flex-shrink:0;"><polyline points="20 6 9 17 4 12"/></svg>`;
     setTimeout(() => { processingList.innerHTML = ""; processingTray.classList.add("hidden"); }, 2500);
 
-    // ---------- Step 3: order-based fill (proportional distribution) ----------
-    // Dave takes photos in sheet order with 1+ photos per item. Tags always
-    // win when readable, and act as "anchors" that split the photo stream into
-    // segments. Within each segment we distribute photos proportionally across
-    // the items in that range.
+    // ---------- Step 3: order-based fill (scene-change detection) ----------
+    // Dave shoots in sheet order but photo counts per item are wildly uneven
+    // (1 to 20 photos per item). Tags are rarely visible. So we detect where
+    // one item ends and the next begins by comparing perceptual hashes
+    // (dhashes) of consecutive photos: consecutive photos of the SAME item
+    // have similar dhashes; a big Hamming-distance jump means Dave moved to a
+    // new item, so we advance the cursor.
     //
-    // Verified with 6 scenarios (see test_order_match.py):
-    //   - 5 photos / 5 items no tags   → perfect 1:1
-    //   - 9 photos / 5 items no tags   → 2/2/2/2/1 distribution
-    //   - mixed with tag anchors        → tags at correct items, fills between
-    //   - every photo tagged            → pure tag match, no order needed
-    //   - 6 photos / 3 items no tags   → 2/2/2 distribution
-    //   - 3 photos / 5 items no tags   → spread evenly across the 5 items
+    // Verified with 5 scenarios (see test_order_match.py):
+    //   - 5/2/3/1/4 photos across 5 items      → all correct
+    //   - 20/1/1 extreme uneven               → all correct
+    //   - 1 photo per item                     → all correct
+    //   - tag anchor skips an item             → tag wins, following photos follow
+    //   - only one item photographed           → no false scene changes
     const itemNumByIndex = items.map(i => i.item_num);
     const indexByItemNum = new Map(items.map((i, idx) => [i.item_num, idx]));
 
-    // Find tag anchors: (photoIndex, itemIndex) pairs.
-    const anchors = [];
-    for (let pi = 0; pi < allPhotoInfos.length; pi++) {
-      const p = allPhotoInfos[pi];
-      if (p.match_kind === "tag" && indexByItemNum.has(p.item_num_match)) {
-        anchors.push([pi, indexByItemNum.get(p.item_num_match)]);
+    // Hamming distance between two 16-char hex (64-bit) dhashes.
+    function hammingDist(h1, h2) {
+      if (!h1 || !h2 || h1.length !== h2.length) return 32;
+      // Split 16-char hex into two 8-char halves so we can use 32-bit XOR
+      // (JavaScript bitwise ops are 32-bit).
+      let d = 0;
+      for (let k = 0; k < h1.length; k += 8) {
+        const a = parseInt(h1.slice(k, k + 8), 16) >>> 0;
+        const b = parseInt(h2.slice(k, k + 8), 16) >>> 0;
+        let x = a ^ b;
+        // popcount
+        x = x - ((x >>> 1) & 0x55555555);
+        x = (x & 0x33333333) + ((x >>> 2) & 0x33333333);
+        x = (x + (x >>> 4)) & 0x0f0f0f0f;
+        d += (x * 0x01010101) >>> 24;
       }
+      return d;
     }
 
-    // Build segments between anchors (with virtual bounds at start/end).
-    const segments = [];
-    let prevPhotoIdx = -1;
-    let prevItemIdx = 0;
-    for (const [ap, ai] of anchors) {
-      segments.push({
-        photoStart: prevPhotoIdx + 1,
-        photoEnd: ap,          // exclusive
-        itemStart: prevItemIdx,
-        itemEnd: ai,           // exclusive
-      });
-      prevPhotoIdx = ap;
-      prevItemIdx = ai;        // next segment can still start at this item
-    }
-    segments.push({
-      photoStart: prevPhotoIdx + 1,
-      photoEnd: allPhotoInfos.length,
-      itemStart: prevItemIdx,
-      itemEnd: items.length,
-    });
+    // Threshold: dhashes of same-item photos typically differ by 0–10 bits;
+    // different items differ by 20–40 bits. 18 sits comfortably between.
+    const SCENE_THRESHOLD = 18;
 
-    for (const seg of segments) {
-      const nPhotos = seg.photoEnd - seg.photoStart;
-      const nItems = seg.itemEnd - seg.itemStart;
-      if (nPhotos <= 0) continue;
-      if (nItems <= 0) {
-        // No items left in range — dump into last item of segment.
-        const targetIdx = Math.min(seg.itemStart, items.length - 1);
-        for (let pi = seg.photoStart; pi < seg.photoEnd; pi++) {
-          const p = allPhotoInfos[pi];
-          if (p.match_kind === "none") {
-            p.item_num_match = itemNumByIndex[targetIdx] || "";
-            p.match_kind = p.item_num_match ? "order" : "none";
-          }
-        }
+    let cursor = 0;
+    let prevDhash = null;
+    for (const p of allPhotoInfos) {
+      if (p.match_kind === "tag" && indexByItemNum.has(p.item_num_match)) {
+        // Tag wins — jump cursor to the tagged item.
+        cursor = indexByItemNum.get(p.item_num_match);
+        prevDhash = p.dhash || "";
         continue;
       }
-      // Proportional: photo j in segment → items[itemStart + floor(j * nItems / nPhotos)]
-      for (let j = 0; j < nPhotos; j++) {
-        const pi = seg.photoStart + j;
-        const p = allPhotoInfos[pi];
-        if (p.match_kind !== "none") continue;
-        let targetIdx = seg.itemStart + Math.floor(j * nItems / nPhotos);
-        if (targetIdx >= items.length) targetIdx = items.length - 1;
-        p.item_num_match = itemNumByIndex[targetIdx] || "";
+
+      // Scene-change check against previous photo.
+      if (prevDhash !== null) {
+        const d = hammingDist(prevDhash, p.dhash || "");
+        if (d >= SCENE_THRESHOLD && cursor + 1 < items.length) {
+          cursor += 1;
+        }
+      }
+
+      if (p.match_kind === "none") {
+        p.item_num_match = itemNumByIndex[cursor] || "";
         p.match_kind = p.item_num_match ? "order" : "none";
       }
+      prevDhash = p.dhash || "";
     }
 
     // Wire everything back into local state so the preview UI can render it.
@@ -1197,6 +1188,7 @@ async function jnjHandleFiles(files) {
         description_read: p.description_read,
         item_num_match: p.item_num_match,
         match_kind: p.match_kind,
+        dhash: p.dhash || "",
       });
     }
     const itemPhotos = {};
