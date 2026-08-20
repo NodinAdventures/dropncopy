@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-19-boxed-seller-num-v20";
+const BUILD_ID = "2026-08-19-multi-sheet-seller-v21";
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -991,7 +991,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v20 · ${BUILD_ID}`;
+  badge.textContent = `v21 · ${BUILD_ID}`;
   document.body.appendChild(badge);
 } catch {}
 
@@ -1074,33 +1074,34 @@ async function jnjHandleFiles(files) {
     return;
   }
 
-  // Separate sheet from photos on the client (server used to do this, but we
-  // now call two separate endpoints so we split here).
-  let sheet = null;
+  // Separate SHEETS (may be multiple) from photos on the client.
+  // v21: supports dropping multiple sheets in one batch, each with its own
+  // hand-drawn boxed seller # — items from each sheet get tagged with that
+  // sheet's own seller number.
+  const sheets = [];
   const photos = [];
   for (const f of files) {
     const name = (f.name || "").toLowerCase();
     const isPdf = name.endsWith(".pdf") || f.type === "application/pdf";
-    if (isPdf && !sheet) sheet = f;
+    if (isPdf) sheets.push(f);
     else photos.push(f);
   }
-  // If no PDF, fall back to filename hints (any "sheet"/"intake"/"file*" image).
-  if (!sheet) {
-    for (let i = 0; i < photos.length; i++) {
+  // If no PDFs, pull anything that looks like a sheet by filename.
+  if (sheets.length === 0) {
+    for (let i = photos.length - 1; i >= 0; i--) {
       const n = (photos[i].name || "").toLowerCase();
       if (/(sheet|intake)/.test(n) || n.startsWith("file")) {
-        sheet = photos.splice(i, 1)[0];
-        break;
+        sheets.unshift(photos.splice(i, 1)[0]);
       }
     }
   }
-  // Last-resort: use the smallest file as the sheet (single-page PDFs are ~200KB,
-  // item photos from phones are 2–4MB).
-  if (!sheet && photos.length > 1) {
+  // Last-resort: if still no sheet identified AND there's clearly a size gap,
+  // treat the single smallest file as the sheet (phones = 2-4MB, sheets ~200KB).
+  if (sheets.length === 0 && photos.length > 1) {
     photos.sort((a, b) => a.size - b.size);
-    sheet = photos.shift();
+    sheets.push(photos.shift());
   }
-  if (!sheet) {
+  if (sheets.length === 0) {
     jnjShowErrorBanner("Couldn't identify a sheet in the upload. Please add the intake sheet as a PDF or a clear photo.");
     return;
   }
@@ -1121,26 +1122,49 @@ async function jnjHandleFiles(files) {
     statusEl.textContent = "checking server…";
     await jnjWarmupServer(statusEl);
 
-    // ---------- Step 1: transcribe the sheet ----------
-    statusEl.textContent = "reading sheet…";
-    const sheetFd = new FormData();
-    sheetFd.append("sheet", sheet);
-    const sheetData = await postForJson(JNJ_BUILD_SHEET_URL, sheetFd, "Sheet transcription");
-    const items = sheetData.items || [];
-    if (!items.length) throw new Error("Sheet transcribed but no item rows were parsed.");
+    // ---------- Step 1: transcribe ALL sheets (in parallel) ----------
+    // v21: each sheet contributes its own items + its own boxed seller #.
+    // Every item is tagged with sheet_seller_num so the CSV builder can put
+    // the right ID on each row.
+    statusEl.textContent = sheets.length > 1 ? `reading ${sheets.length} sheets…` : "reading sheet…";
+    const sheetResults = await Promise.all(sheets.map(async (sheetFile, sIdx) => {
+      const sheetFd = new FormData();
+      sheetFd.append("sheet", sheetFile);
+      const sd = await postForJson(JNJ_BUILD_SHEET_URL, sheetFd, `Sheet ${sIdx + 1}/${sheets.length}`);
+      const sellerNum = (sd.seller_number || "").trim();
+      // Tag each item from this sheet with its own boxed seller #.
+      const itemsFromSheet = (sd.items || []).map(it => ({
+        ...it,
+        sheet_seller_num: sellerNum,
+        sheet_index: sIdx,
+      }));
+      return { items: itemsFromSheet, seller_number: sellerNum, filename: sheetFile.name };
+    }));
 
-    // v20: server may have detected a hand-drawn boxed seller number on the
-    // sheet (staff-use-only ID that has to be on every item's CSV row). If it
-    // found one, auto-fill the Seller ID field and remember the value so the
-    // next sheet doesn't overwrite it silently.
-    const detectedSellerNum = (sheetData.seller_number || "").trim();
-    if (detectedSellerNum) {
-      jnjSellerId.value = detectedSellerNum;
+    // Flatten items across all sheets, preserving order (sheet 1's items first, etc.).
+    const items = [];
+    const sellerNums = [];
+    for (const r of sheetResults) {
+      items.push(...r.items);
+      if (r.seller_number) sellerNums.push(r.seller_number);
+    }
+    if (!items.length) throw new Error("Sheets transcribed but no item rows were parsed.");
+
+    // Auto-fill Seller ID with the FIRST detected number (as a display convenience).
+    // The actual CSV uses each item's own sheet_seller_num, so this field is only
+    // used as a fallback for items whose sheet didn't produce a boxed number.
+    if (sellerNums.length > 0) {
+      jnjSellerId.value = sellerNums[0];
       jnjSavePrefs();
-      toast(`Detected seller # ${detectedSellerNum} on the sheet — filled the Seller ID field.`);
+      if (sellerNums.length === 1) {
+        toast(`Detected seller # ${sellerNums[0]} on the sheet.`);
+      } else {
+        const uniq = [...new Set(sellerNums)];
+        toast(`Detected ${uniq.length} seller #${uniq.length > 1 ? "s" : ""} across ${sheets.length} sheets: ${uniq.join(", ")}`);
+      }
     }
 
-    statusEl.textContent = `sheet done — ${items.length} items${detectedSellerNum ? `, seller #${detectedSellerNum}` : ""}. Matching ${photos.length} photos…`;
+    statusEl.textContent = `sheets done — ${items.length} items across ${sheets.length} sheet${sheets.length > 1 ? "s" : ""}${sellerNums.length ? `, sellers ${[...new Set(sellerNums)].join(", ")}` : ""}. Matching ${photos.length} photos…`;
 
     // ---------- Step 2: process photos in batches, in parallel ----------
     // Batch size 8 with concurrency 3 means we're running 24 photos through

@@ -674,7 +674,8 @@ def parse_item_lines(transcript: str) -> List[Tuple[str, str, str]]:
 
 
 def build_jnj_csv_row(item_num: str, lot_code: str, description: str,
-                     sale_name: str, seller_id: str, seller_seq: int) -> dict:
+                     sale_name: str, seller_id: str, seller_seq: int,
+                     per_item_seller: str = "") -> dict:
     """
     Build one row of the JnJ CSV.
 
@@ -709,14 +710,17 @@ def build_jnj_csv_row(item_num: str, lot_code: str, description: str,
     row["Description"] = description
     # StartBid must have a value for auction listing format
     row["StartBid"] = "$1.00 "
-    # cf_SellerID: use seller_id directly (all rows on one sheet share it).
-    # For backward compat, if seller_seq differs from seller_id's own trailing digits
-    # (i.e. caller passed a plain prefix + sequence), fall back to old behavior.
-    if seller_id and any(c.isdigit() for c in seller_id):
-        # seller_id already has digits (like 'AA1961') -> use as-is for all rows
+    # cf_SellerID priority:
+    #   1. per_item_seller (from the item's own sheet's boxed number) — wins if set,
+    #      because in multi-sheet drops each sheet has its own boxed seller #.
+    #   2. seller_id already has digits (like 'AA1961') -> use as-is for all rows
+    #   3. seller_id is a prefix only (like 'AA') -> append the sequence
+    per_item_seller = (per_item_seller or "").strip()
+    if per_item_seller:
+        row["cf_SellerID"] = per_item_seller
+    elif seller_id and any(c.isdigit() for c in seller_id):
         row["cf_SellerID"] = seller_id
     elif seller_id:
-        # seller_id is a prefix only (like 'AA') -> append the sequence
         row["cf_SellerID"] = f"{seller_id}{seller_seq}"
     else:
         row["cf_SellerID"] = ""
@@ -1577,9 +1581,13 @@ async def jnj_zip(
         item_num = it.get("item_num", "")
         lot_code = it.get("lot_code", "")
         description = it.get("description", "")
+        # Per-item seller # (from the item's own sheet's boxed number) — used
+        # when multiple sheets are dropped together, each with its own boxed #.
+        per_item_seller = it.get("sheet_seller_num", "") or it.get("seller_num", "")
         row = build_jnj_csv_row(
             item_num, lot_code, description,
             sale_name, seller_id, seller_start + idx,
+            per_item_seller=per_item_seller,
         )
         # Title cap is enforced inside build_jnj_csv_row.
 
