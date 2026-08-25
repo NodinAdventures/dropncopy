@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-25-detect-jnj-branded-dividers-v25.28";
+const BUILD_ID = "2026-08-25-ai-verify-assignments-v25.29";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v25.28 boot. BUILD_ID:", "2026-08-25-detect-jnj-branded-dividers-v25.28");
+jnjLog("BOOT", "v25.29 boot. BUILD_ID:", "2026-08-25-ai-verify-assignments-v25.29");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -1085,7 +1085,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v25.28 · ${BUILD_ID}`;
+  badge.textContent = `v25.29 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
@@ -1540,6 +1540,76 @@ async function jnjHandleFiles(input) {
     }
     jnjLog("CURSOR-WALK", `photos=${allPhotoInfos.length}`, `blanks_detected=${blanksSeen}`, `final_cursor=${cursor}`, `total_items=${items.length}`);
     jnjLog("CURSOR-TRACE", walkTrace.join(" | "));
+
+    // v25.29: post-cursor verification pass. The cursor walk assumes
+    // black dividers cleanly separate items. When Dave forgets a divider
+    // or shoots one photo out of order, photos land on the wrong item.
+    // This pass asks GPT-4o-mini "does this photo match its assigned
+    // item's description, or the NEXT item's description?" and silently
+    // moves any mismatches forward.
+    //
+    // Rules:
+    //  - only check photos that are actually assigned (match_kind==="order")
+    //  - skip photos on the last item (no next item to compare against)
+    //  - run in parallel batches of 8 to avoid rate limits
+    //  - safe default: keep on current item if GPT is unsure or fails
+    try {
+      const itemNumToDesc = {};
+      const itemNumToIndex = {};
+      items.forEach((it, i) => {
+        itemNumToDesc[it.item_num] = it.description || "";
+        itemNumToIndex[it.item_num] = i;
+      });
+      const verifiable = allPhotoInfos.filter(p =>
+        p.match_kind === "order" &&
+        p.item_num_match &&
+        p.thumb_data_url &&
+        itemNumToIndex[p.item_num_match] !== undefined &&
+        itemNumToIndex[p.item_num_match] + 1 < items.length
+      );
+      jnjLog("VERIFY-START", `verifying ${verifiable.length} photos across ${items.length} items`);
+      const moves = [];
+      const BATCH = 8;
+      for (let i = 0; i < verifiable.length; i += BATCH) {
+        const batch = verifiable.slice(i, i + BATCH);
+        await Promise.all(batch.map(async (p) => {
+          try {
+            const curIdx = itemNumToIndex[p.item_num_match];
+            const nextItemNum = items[curIdx + 1].item_num;
+            const curDesc = itemNumToDesc[p.item_num_match] || "";
+            const nextDesc = itemNumToDesc[nextItemNum] || "";
+            // Strip the data URL prefix — server wants raw base64.
+            const photoB64 = (p.thumb_data_url || "").replace(/^data:image\/[a-z]+;base64,/, "");
+            if (!photoB64) return;
+            const form = new FormData();
+            form.set("photo_b64", photoB64);
+            form.set("current_item_desc", curDesc);
+            form.set("next_item_desc", nextDesc);
+            const res = await fetch("/api/jnj-verify-assignment", { method: "POST", body: form });
+            if (!res.ok) return;
+            const data = await res.json();
+            if (data && data.verdict === "next") {
+              moves.push({ photo: p, from: p.item_num_match, to: nextItemNum });
+            }
+          } catch (e) {
+            jnjLog("VERIFY-ERR", p.filename, e && e.message);
+          }
+        }));
+      }
+      // Apply moves after the pass so we don't shift assignments mid-check.
+      for (const m of moves) {
+        m.photo.item_num_match = m.to;
+        // Keep match_kind as "order" — the photo is still order-matched, just to a different item.
+      }
+      jnjLog("VERIFY-DONE", `${moves.length} photos reassigned to next item`);
+      if (moves.length) {
+        const summary = moves.slice(0, 20).map(m => `${m.photo.filename}: ${m.from}→${m.to}`).join(" | ");
+        jnjLog("VERIFY-MOVES", summary + (moves.length > 20 ? ` ...+${moves.length - 20} more` : ""));
+      }
+    } catch (e) {
+      jnjLog("VERIFY-FAIL", e && e.message || String(e));
+      // Don't block the build — unverified assignments are still usable.
+    }
 
     // Wire everything back into local state so the preview UI can render it.
     // v25: was `[sheet, ...photos]` (singular sheet from pre-v23) — v23 renamed to

@@ -1754,6 +1754,77 @@ async def jnj_resolve_maybe(
         return JSONResponse({"is_item": True})
 
 
+@app.post("/api/jnj-verify-assignment")
+async def jnj_verify_assignment(
+    photo_b64: str = Form(...),
+    current_item_desc: str = Form(...),
+    next_item_desc: str = Form(""),
+):
+    """v25.29: after the cursor walk assigns photos to items, verify each
+    photo actually matches its item's description. If the photo looks more
+    like the NEXT item's description, suggest a move.
+
+    Ashley's use case: sometimes Dave shoots a photo of item B before
+    triggering the black-divider, so it lands on item A by mistake. This
+    pass catches that.
+
+    Returns one of:
+      {"verdict": "current"}  - photo matches its current item (keep)
+      {"verdict": "next"}     - photo matches the next item better (move)
+      {"verdict": "neither"}  - photo doesn't clearly fit either (keep on current, safe default)
+    """
+    if not photo_b64 or not current_item_desc:
+        return JSONResponse({"verdict": "current"})
+
+    if not _OPENAI_KEY:
+        return JSONResponse({"verdict": "current"})
+
+    # If there's no next item to compare against, no point checking — keep it.
+    if not next_item_desc.strip():
+        return JSONResponse({"verdict": "current"})
+
+    # Truncate descriptions to keep the prompt tight.
+    cur = current_item_desc.strip()[:300]
+    nxt = next_item_desc.strip()[:300]
+
+    try:
+        resp = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": (
+                        "An estate-auction photo has been tentatively assigned to Item A. Look at the photo (ignore the 'JNJ ONLINE AUCTION - FREMONT' watermark burned into the bottom) and decide which item it best matches.\n\n"
+                        f"ITEM A description: {cur}\n"
+                        f"ITEM B description: {nxt}\n\n"
+                        "Note: an item may contain multiple objects (e.g. '3 lamps, 2 vases, box of tools') and Dave often shoots several photos per item from different angles. A photo showing ANY object mentioned in item A's description matches Item A.\n\n"
+                        "Reply with EXACTLY one word:\n"
+                        "  A       - photo clearly shows an object described in Item A (default when unsure)\n"
+                        "  B       - photo clearly shows an object described in Item B but NOT in Item A\n"
+                        "  NEITHER - photo doesn't match either description (rare)\n\n"
+                        "Bias strongly toward A. Only answer B if the photo shows something specifically mentioned in Item B's description that is NOT in Item A's description."
+                    )},
+                    {"type": "image_url", "image_url": {
+                        "url": f"data:image/jpeg;base64,{photo_b64}",
+                        "detail": "low",
+                    }},
+                ],
+            }],
+            max_tokens=5,
+            temperature=0,
+        )
+        answer = (resp.choices[0].message.content or "").strip().upper()
+        if answer.startswith("B"):
+            return JSONResponse({"verdict": "next"})
+        if answer.startswith("N"):
+            return JSONResponse({"verdict": "neither"})
+        return JSONResponse({"verdict": "current"})
+    except Exception as e:
+        print(f"verify-assignment failed: {type(e).__name__}: {e}", flush=True)
+        # Safe default: keep on current item.
+        return JSONResponse({"verdict": "current"})
+
+
 @app.post("/api/jnj-rematch")
 async def jnj_rematch(
     photo_id: str = Form(...),
