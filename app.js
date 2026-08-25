@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-25-mid-sheet-boundary-v25.10";
+const BUILD_ID = "2026-08-25-force-top-group-active-v25.11";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v25.10 boot. BUILD_ID:", "2026-08-25-mid-sheet-boundary-v25.10");
+jnjLog("BOOT", "v25.11 boot. BUILD_ID:", "2026-08-25-force-top-group-active-v25.11");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -1054,7 +1054,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v25.10 · ${BUILD_ID}`;
+  badge.textContent = `v25.11 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
@@ -1218,6 +1218,13 @@ async function jnjHandleFiles(input) {
       if (!sellerGroups.length && sellerNum) {
         sellerGroups = [{ seller_num: sellerNum, first_item_num: "" }];
       }
+      // v25.11: if the first group has no first_item_num boundary, blank it
+      // out (it's just "the top of the sheet"). And ensure the top group is
+      // ALWAYS active from item 0 — don't leave items stamped with the
+      // page-level seller_number when a boxed group exists on the sheet.
+      if (sellerGroups.length) {
+        sellerGroups[0] = { ...sellerGroups[0], first_item_num: "" };
+      }
       jnjLog("SHEET-RESULT", `sheet=${sIdx + 1}/${sheets.length}`, `filename=${sheetFile.name}`, `seller_number=${JSON.stringify(sd.seller_number)}`, `groups=${JSON.stringify(sellerGroups)}`, `items=${(sd.items || []).length}`);
 
       // Stamp each item from this sheet with the correct seller # by
@@ -1233,25 +1240,22 @@ async function jnjHandleFiles(input) {
         const m = /^([0-9]+)/.exec(String(s || ""));
         return m ? parseInt(m[1], 10) : NaN;
       };
-      let groupIdx = -1; // -1 = before any group; use "" seller until we hit one
+      // v25.11: start at group 0 immediately if any groups exist. The top
+      // group covers items from row 0 down until the next group's boundary.
+      let groupIdx = sellerGroups.length > 0 ? 0 : -1;
       const itemsFromSheet = rawItems.map((it, itemIdx) => {
         const itemNum = normItem(it.item_num || it.LotNumber || it.lot_number || "");
         const itemInt = asInt(itemNum);
         // Advance groupIdx if we've reached the next group's start.
-        // "Reached" means: first item on the sheet (group 0 always covers
-        // the first item), OR item matches boundary exactly, OR item's
-        // numeric value has met/passed the boundary's numeric value.
+        // "Reached" means item matches boundary exactly, OR item's numeric
+        // value has met/passed the boundary's numeric value.
         while (groupIdx + 1 < sellerGroups.length) {
           const boundary = normItem(sellerGroups[groupIdx + 1].first_item_num);
           const boundaryInt = asInt(boundary);
-          const isFirstItem = itemIdx === 0;
           const exactMatch = boundary && itemNum === boundary;
           const numericPassed = !isNaN(itemInt) && !isNaN(boundaryInt) && itemInt >= boundaryInt;
-          if (isFirstItem || exactMatch || numericPassed) {
+          if (exactMatch || numericPassed) {
             groupIdx += 1;
-            // If we advanced only because it's the very first item and there's
-            // no known boundary yet, don't keep advancing.
-            if (!exactMatch && !numericPassed) break;
           } else {
             break;
           }
