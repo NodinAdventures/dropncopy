@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-25-persistent-debug-v24";
+const BUILD_ID = "2026-08-25-fix-sheet-refs-v25";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v24 debug logging active. BUILD_ID:", "2026-08-25-persistent-debug-v24");
+jnjLog("BOOT", "v25 boot. BUILD_ID:", "2026-08-25-fix-sheet-refs-v25");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -1054,7 +1054,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v24 · ${BUILD_ID}`;
+  badge.textContent = `v25 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
@@ -1415,8 +1415,11 @@ async function jnjHandleFiles(input) {
     }
 
     // Wire everything back into local state so the preview UI can render it.
+    // v25: was `[sheet, ...photos]` (singular sheet from pre-v23) — v23 renamed to
+    // `sheets` (array) but this line was missed, causing a ReferenceError at the
+    // very end of the build after all photos matched. Now uses the sheets array.
     const filesByName = new Map();
-    for (const f of [sheet, ...photos]) filesByName.set(f.name, f);
+    for (const f of [...sheets, ...photos]) filesByName.set(f.name, f);
     const photoMap = new Map();
     for (const p of allPhotoInfos) {
       photoMap.set(p.filename, {
