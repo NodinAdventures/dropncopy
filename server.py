@@ -653,6 +653,10 @@ JNJ_DEFAULTS = {
     "ZipCode": "49412",
     "StartBid": "$1.00 ",
     "BuyersPremiumPct": "10",
+    # v25.17: IsTaxable=1 so the item is marked taxable; TaxPercent=6 matches
+    # the 6% Michigan rate shown on live J&J listings. J&J's spec notes the
+    # seller's state-specific tax settings can override this per buyer state.
+    "IsTaxable": "1",
     "TaxPercent": "6",
     # v25.15: J&J's importer rejected v25.14 with "Missing End Date or Duration"
     # on every row (see IMG_2896/IMG_2897). Column V (Duration) is required
