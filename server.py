@@ -1844,10 +1844,16 @@ async def jnj_zip(
             # J&J-style sequential name: "<PREFIX> NNN.<ext>", zero-padded to 3.
             sale_photo_seq += 1
             leaf_name = f"{photo_prefix} {sale_photo_seq:03d}.{ext}"
-            # v25.16b: photos inside Pictures/<sale>/ subfolder, CSV cell uses
-            # J&J-style Windows backslash path "..\Pictures\<sale>\<file>".
-            zip_path = f"Pictures/{sale_folder}/{leaf_name}"
-            csv_ref = f"..\\Pictures\\{sale_folder}\\{leaf_name}"
+            # v25.21: uploader still shows "Missing Image" for every row even
+            # though photos ARE in the ZIP. Hypothesis: their uploader uses the
+            # leaf name of the CSV cell to find a file inside the ZIP, and it
+            # extracts to a flat working dir before lookup. So put photos at ZIP
+            # ROOT with bare leaf names, and write the CSV cell as JUST the bare
+            # leaf (no path, no backslash, no ..\). This is what their help
+            # doc literally says: "filename of an image included in the uploaded
+            # zip file" — filename, not path.
+            zip_path = leaf_name
+            csv_ref = leaf_name
             data = await p.read()
             # Reset the file position so we don't consume it if it's used again
             await p.seek(0)
