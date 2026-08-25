@@ -1754,13 +1754,22 @@ async def jnj_zip(
     if not items:
         raise HTTPException(400, "No items provided.")
 
+    # v25.18: diagnostic logging — was tripped up before by ZIPs missing all
+    # photos even though the preview showed 83/83 matched. Print exactly what
+    # the server received so we can tell if photos got stripped in transit or
+    # if the mapping step failed. Visible in Render logs.
+    print(f"[jnj-zip] items={len(items)} photo_map_entries={len(photo_map)} photos_received={len(photos)} sale='{sale_name}' seller_id='{seller_id}'", flush=True)
+
     # Group photos by item_num, preserving upload order.
     photos_by_item: Dict[str, List[UploadFile]] = {}
+    skipped_no_target = 0
     for p in photos:
         target = photo_map.get(p.filename or "")
         if not target:
+            skipped_no_target += 1
             continue
         photos_by_item.setdefault(target, []).append(p)
+    print(f"[jnj-zip] photos grouped into {len(photos_by_item)} items, {skipped_no_target} skipped (no target in photo_map)", flush=True)
 
     # --- v25.16b: restore J&J's proven subfolder+backslash layout -----------
     # 25.16a tried bare filenames flat at ZIP root: photos still didn't attach

@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-25-taxable-6pct-v25.17";
+const BUILD_ID = "2026-08-25-photo-attach-debug-v25.18";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v25.17 boot. BUILD_ID:", "2026-08-25-taxable-6pct-v25.17");
+jnjLog("BOOT", "v25.18 boot. BUILD_ID:", "2026-08-25-photo-attach-debug-v25.18");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -1054,7 +1054,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v25.17 · ${BUILD_ID}`;
+  badge.textContent = `v25.18 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
@@ -1916,10 +1916,23 @@ async function jnjDownloadZip() {
     fd.append("seller_start", String(sellerStart));
     fd.append("items_json", JSON.stringify(jnjState.items));
     fd.append("photo_map_json", JSON.stringify(photoMap));
-    // Attach every matched photo file
+    // Attach every matched photo file. v25.18: log EVERY attach so we can see
+    // in the debug log whether photos actually made it into the multipart body.
+    // Previously we saw a ZIP with 0 photos even though preview showed 83
+    // matched — need to know if browser attached them or dropped them silently.
+    let attachedCount = 0, missingFile = 0, missingInfo = 0;
+    let totalBytes = 0;
     for (const fname of Object.keys(photoMap)) {
       const info = jnjState.photos.get(fname);
-      if (info && info.file) fd.append("photos", info.file, fname);
+      if (!info) { missingInfo++; continue; }
+      if (!info.file) { missingFile++; continue; }
+      fd.append("photos", info.file, fname);
+      attachedCount++;
+      totalBytes += info.file.size || 0;
+    }
+    jnjLog("ZIP-UPLOAD", `photoMap has ${Object.keys(photoMap).length} entries; attached ${attachedCount} photos to FormData (${(totalBytes/1024/1024).toFixed(1)} MB total); missingInfo=${missingInfo}, missingFile=${missingFile}`);
+    if (attachedCount === 0 && Object.keys(photoMap).length > 0) {
+      toast(`WARNING: 0 of ${Object.keys(photoMap).length} matched photos attached to upload — tap the version badge to see the debug log.`);
     }
 
     const res = await fetch(JNJ_ZIP_URL, { method: "POST", body: fd });
