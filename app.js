@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-25-loosen-divider-detection-v25.26";
+const BUILD_ID = "2026-08-25-collapsible-staged-list-v25.27";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v25.26 boot. BUILD_ID:", "2026-08-25-loosen-divider-detection-v25.26");
+jnjLog("BOOT", "v25.27 boot. BUILD_ID:", "2026-08-25-collapsible-staged-list-v25.27");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -795,6 +795,13 @@ function isUsablePhoto(f) {
 // to its own items downstream.
 let jnjStaged = { sheets: [], photos: [] };
 
+// v25.27: staged-list is now COLLAPSIBLE. When Ashley stages 200+ photos
+// the individual rows push the Build button off-screen. We show only the
+// summary chip + Build/Clear buttons by default, and hide the file list
+// behind a "Show files" toggle. Persist the open/closed state on window
+// so it survives re-renders.
+if (typeof window.__jnjStagedOpen === "undefined") window.__jnjStagedOpen = false;
+
 function jnjRenderStaged() {
   const hasAny = jnjStaged.sheets.length > 0 || jnjStaged.photos.length > 0;
   jnjStagedList.style.display = hasAny ? "block" : "none";
@@ -812,7 +819,7 @@ function jnjRenderStaged() {
   });
   jnjStaged.photos.forEach((p, i) => {
     rows.push(`<div class="jnj-staged-row" style="display:flex;align-items:center;gap:10px;padding:6px 12px;font-size:13px;">
-      <span style="font-size:11px;color:var(--muted);width:24px;">${i+1}.</span>
+      <span style="font-size:11px;color:var(--muted);width:32px;flex-shrink:0;">${i+1}.</span>
       <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(p.name || "photo")}</span>
       <span style="font-size:11px;color:var(--muted);">${(p.size/1024).toFixed(0)} KB</span>
       <button type="button" data-remove-photo="${i}" class="ghost-btn" style="padding:2px 8px;font-size:12px;">Remove</button>
@@ -824,10 +831,34 @@ function jnjRenderStaged() {
     const missing = [];
     if (jnjStaged.sheets.length === 0) missing.push("at least 1 sheet");
     if (jnjStaged.photos.length === 0) missing.push("at least 1 photo");
-    const header = missing.length
-      ? `<div style="font-size:12px;color:#ff9a3d;margin-bottom:8px;font-weight:600;">Still need: ${missing.join(" and ")}</div>`
-      : `<div style="font-size:12px;color:#3ecf8e;margin-bottom:8px;font-weight:600;">Ready — ${jnjStaged.sheets.length} sheet${jnjStaged.sheets.length === 1 ? "" : "s"} + ${jnjStaged.photos.length} photo${jnjStaged.photos.length === 1 ? "" : "s"} (${total} files)</div>`;
-    jnjStagedList.innerHTML = header + rows.join("");
+
+    const summary = missing.length
+      ? `<div style="font-size:13px;color:#ff9a3d;font-weight:600;">Still need: ${missing.join(" and ")}</div>`
+      : `<div style="font-size:13px;color:#3ecf8e;font-weight:600;">Ready — ${jnjStaged.sheets.length} sheet${jnjStaged.sheets.length === 1 ? "" : "s"} + ${jnjStaged.photos.length} photo${jnjStaged.photos.length === 1 ? "" : "s"} (${total} files)</div>`;
+
+    const isOpen = window.__jnjStagedOpen;
+    const toggleLabel = isOpen ? `▼ Hide files` : `▶ Show files (${total})`;
+
+    const listStyle = isOpen
+      ? "max-height:280px;overflow-y:auto;margin-top:10px;padding:6px;background:rgba(255,255,255,0.02);border-radius:8px;border:1px solid var(--border);"
+      : "display:none;";
+
+    jnjStagedList.innerHTML = `
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+        ${summary}
+        <button type="button" id="jnjToggleFiles" class="ghost-btn" style="padding:4px 10px;font-size:12px;flex-shrink:0;">${toggleLabel}</button>
+      </div>
+      <div id="jnjStagedFilesList" style="${listStyle}">${rows.join("")}</div>
+    `;
+
+    const toggleBtn = jnjStagedList.querySelector("#jnjToggleFiles");
+    if (toggleBtn) {
+      toggleBtn.addEventListener("click", (e) => {
+        e.preventDefault();
+        window.__jnjStagedOpen = !window.__jnjStagedOpen;
+        jnjRenderStaged();
+      });
+    }
   }
   jnjBuildBtn.disabled = !(jnjStaged.sheets.length > 0 && jnjStaged.photos.length > 0);
   jnjBuildBtn.style.opacity = jnjBuildBtn.disabled ? "0.5" : "1";
@@ -1054,7 +1085,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v25.26 · ${BUILD_ID}`;
+  badge.textContent = `v25.27 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
