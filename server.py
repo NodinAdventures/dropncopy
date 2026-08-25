@@ -464,66 +464,70 @@ def is_blank_image(png_bytes: bytes, dark_ratio_threshold: float = 0.005) -> boo
 
 
 def is_divider_photo(image_bytes: bytes) -> bool:
-    """v25.26: Fast deterministic check for Dave's "divider" photos — the ones
-    he shoots between items to visually separate lots. These are almost
-    always all-black (lens covered), all-white (hand over lens/flash), or
-    another near-monochrome frame with almost no detail.
+    """v25.28: Detect JnJ's branded divider photos.
 
-    v25.26 loosened thresholds after Ashley's 8-sheet test where only 19 of
-    ~50 expected black dividers were detected. Dave's phone camera introduces
-    noise/grain when the lens is covered, pushing mean brightness up to 25-45
-    and stddev up to 15-30 — well above v25.2's tight bounds. We also added
-    a low-edge-count signal (Sobel-lite) because a lens-covered frame has
-    near-zero edges, while any real photo of an item has thousands.
+    CRITICAL FINDING (Aug 25 2026): JnJ burns a white 'JNJ ONLINE AUCTION
+    - FREMONT' watermark into the BOTTOM of EVERY photo they upload — both
+    real item photos and divider slides. That means:
+      - Divider photos aren't 'blank black'; they're black with white text.
+      - Naive mean/stddev on the whole image gets skewed by the watermark.
+      - Every photo has thousands of edge pixels from the text characters.
 
-    Returns True when the photo is:
-      - Dark (mean < 45) AND low variation (stddev < 25) — noisy near-black
-      - OR Bright (mean > 220) AND low variation (stddev < 25) — near-white
-      - OR solid near-monochrome frame (stddev < 15) — any color, no detail
-      - OR near-zero edge density (< 0.5% edge pixels) — lens covered / featureless
+    Solution: crop the watermark strip out before measuring. We only look
+    at the TOP 80% of the image (the actual content area above the JnJ
+    watermark). A true divider will be near-monochrome in that region; a
+    real item photo will have color/edges/variation there.
 
-    This is deterministic, runs in ~10ms per photo, and now catches Dave's
-    imperfect black dividers without needing an AI call. Real photos of
-    dim items still have edges + higher stddev so they're not affected.
+    Returns True when the top-80% content area is:
+      - Dark (mean < 50) AND low variation (stddev < 30) — near-black divider
+      - OR Bright (mean > 220) AND low variation (stddev < 30) — near-white
+      - OR solid near-monochrome (stddev < 18) — any color, no detail
+      - OR near-zero edge density (< 5.0) — no content, watermark cropped out
+
+    Deterministic, ~10ms per photo. Runs BEFORE the AI check so we never
+    burn a GPT call on a divider.
     """
     try:
         from PIL import Image, ImageStat, ImageFilter
         with Image.open(io.BytesIO(image_bytes)) as img:
             gray = img.convert("L")
-            gray.thumbnail((128, 128))
-            stat = ImageStat.Stat(gray)
+            gray.thumbnail((256, 256))  # bigger thumb so 80% crop still meaningful
+            w, h = gray.size
+            # Crop out the bottom 20% — that's where the JnJ watermark lives.
+            # We only measure the actual content area above it.
+            content_area = gray.crop((0, 0, w, int(h * 0.80)))
+            gray.close()
+
+            stat = ImageStat.Stat(content_area)
             mean = stat.mean[0]
             stddev = stat.stddev[0]
 
-            # Edge density check: FIND_EDGES highlights pixels where
-            # brightness changes sharply. A lens-covered frame has ~0 edges.
-            # A real photo of any item has thousands of edge pixels.
-            edges = gray.filter(ImageFilter.FIND_EDGES)
+            # Edge density on the CONTENT AREA only (watermark excluded).
+            # A divider slide will have ~0 edges here; a real photo has
+            # thousands of edges from the item, background clutter, etc.
+            edges = content_area.filter(ImageFilter.FIND_EDGES)
             edge_stat = ImageStat.Stat(edges)
-            # Mean of the edge-magnitude image: 0-5 for lens-covered,
-            # 15-40 for real photos.
             edge_mean = edge_stat.mean[0]
             edges.close()
-            gray.close()
+            content_area.close()
 
-        # Debug log so we can tune if needed.
+        # Debug log so we can tune.
         try:
-            print(f"divider-metrics: mean={mean:.1f} stddev={stddev:.1f} edge_mean={edge_mean:.2f}", flush=True)
+            print(f"divider-metrics-v28: mean={mean:.1f} stddev={stddev:.1f} edge_mean={edge_mean:.2f}", flush=True)
         except Exception:
             pass
 
-        # Near-black with noise (v25.26 primary widening).
-        if mean < 45 and stddev < 25:
+        # Near-black content area (typical black divider slide).
+        if mean < 50 and stddev < 30:
             return True
-        # Near-white (flash / hand-over-lens).
-        if mean > 220 and stddev < 25:
+        # Near-white content area (rare, but possible).
+        if mean > 220 and stddev < 30:
             return True
-        # Solid single-color frame at any brightness (very rare but possible).
-        if stddev < 15:
+        # Solid single-color content area at any brightness.
+        if stddev < 18:
             return True
-        # Near-zero detail — catches lens-covered frames the brightness
-        # thresholds miss (e.g. dark grey camera bag interior).
-        if edge_mean < 4.0:
+        # Very low edge density in content area — blank slide with just the watermark.
+        if edge_mean < 5.0:
             return True
         return False
     except Exception:
@@ -1554,11 +1558,14 @@ async def jnj_match_photos(
                             "role": "user",
                             "content": [
                                 {"type": "text", "text": (
-                                    "This is a photo from an estate auction. It almost certainly shows a physical object being sold: furniture, tool, lamp, appliance, decor, box, art, vehicle, collectible, or any household good.\n\n"
+                                    "This is a photo from an estate auction. EVERY photo (both real items and divider slides) has an 'JNJ ONLINE AUCTION - FREMONT' watermark burned into the bottom of the image. IGNORE that watermark completely when deciding your answer. Look at what's ABOVE the watermark.\n\n"
+                                    "There are exactly two types of photos:\n"
+                                    "  1. REAL ITEM PHOTOS: show an actual object being sold \u2014 furniture, lamp, tool, appliance, art, box, collectible, decor, vehicle, or anything else being auctioned. The item fills most of the frame above the watermark.\n"
+                                    "  2. DIVIDER SLIDES: the photo ABOVE the watermark is essentially empty \u2014 all black, all white, all gray, all one color, or otherwise contains NO auction item at all. These slides are used to separate one item from the next.\n\n"
                                     "Reply with EXACTLY one word:\n\n"
-                                    "NO    - ONLY if the frame is essentially empty: an all-black frame (lens covered), an all-white frame, a hand or finger fully covering the lens with nothing else visible, or a totally blurry featureless frame. If you can identify ANY object at all (even part of one), do NOT answer NO.\n"
-                                    "YES   - any photo where you can see an object, item, piece of furniture, lamp, tool, decor, appliance, or anything being sold. This is the default.\n\n"
-                                    "Bias strongly toward YES. When in doubt, answer YES. Only answer NO for a truly empty/black/white/covered frame."
+                                    "NO    - the area above the JNJ watermark is empty (solid black/white/color, blurry, no item visible). This is a divider slide.\n"
+                                    "YES   - the area above the JNJ watermark contains a real physical item being sold. This is a real item photo.\n\n"
+                                    "Do NOT let the JNJ watermark text influence your answer \u2014 it's on ALL photos. Only look at whether there's an actual item in the frame above it."
                                 )},
                                 {"type": "image_url", "image_url": {
                                     "url": f"data:image/jpeg;base64,{ai_thumb_b64}",
