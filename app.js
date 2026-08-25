@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-25-ditto-expansion-v25.33";
+const BUILD_ID = "2026-08-25-fractions-and-sharper-divider-v25.34";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v25.33 boot. BUILD_ID:", "2026-08-25-ditto-expansion-v25.33");
+jnjLog("BOOT", "v25.34 boot. BUILD_ID:", "2026-08-25-fractions-and-sharper-divider-v25.34");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -1085,7 +1085,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v25.33 · ${BUILD_ID}`;
+  badge.textContent = `v25.34 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
@@ -1519,7 +1519,9 @@ async function jnjHandleFiles(input) {
     // sale has FEWER dividers than expected (Dave forgot some), we don't
     // start treating regular photos as dividers.
     const dividerSet = new Set();
-    const MIN_DIVIDER_SCORE = 300;
+    // v25.34: server scoring got sharper, so raise the floor. True JnJ
+    // dividers now score 500-900; borderline dark item photos score <150.
+    const MIN_DIVIDER_SCORE = 400;
     for (let i = 0; i < expectedDividers && i < scoredPhotos.length; i++) {
       const sp = scoredPhotos[i];
       if (sp.score < MIN_DIVIDER_SCORE) break;

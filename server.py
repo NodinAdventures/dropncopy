@@ -152,6 +152,25 @@ Output them as:
 
 NEVER skip a row because it only has ditto marks. NEVER merge a ditto row into the previous row — it's a separate listing with its own item number.
 
+=== FRACTIONS & MEASUREMENTS (KEEP THEM READABLE) ===
+Sellers often write fractional measurements like `8½ × 12`, `3¾ x 2⁸⁄₈ x 86½`, `72 X 72`, etc. Preserve these as READABLE ASCII fractions — do NOT drop the fraction or flatten it into separate digits.
+
+Rules:
+- `½` → `1/2`
+- `¼` → `1/4`
+- `¾` → `3/4`
+- `⅓` → `1/3`, `⅔` → `2/3`
+- `⅛` → `1/8`, `⅜` → `3/8`, `⅝` → `5/8`, `⅞` → `7/8`
+- `×` (multiplication) → `X`
+- Any handwritten fraction (stacked "1 over 2") → `1/2`
+
+Examples:
+  Sheet: `Bubble Mailer - 8½ × 12`               →  `BUBBLE MAILER 8 1/2 X 12`
+  Sheet: `72 X 72 in 6 ft X 6 ft`                →  `72 X 72 IN 6 FT X 6 FT`
+  Sheet: `Hardwood post - (3) 3¾ × 2⁸⁄₈ × 86½`   →  `HARDWOOD POST 3 3/4 X 2 7/8 X 86 1/2`
+
+NEVER output `8 1 2 X 12` — that's the fraction split into three tokens and is unreadable. ALWAYS keep the fraction as one `N/N` unit like `1/2` or `3/4`.
+
 === MULTI-LINE DESCRIPTIONS (VERY IMPORTANT) ===
 Sellers often write long descriptions that WRAP onto a second or third line on the sheet. When a line on the sheet does NOT start with a new item number, it is a CONTINUATION of the previous item's description — NOT a separate item.
 
@@ -533,28 +552,38 @@ def compute_divider_score(image_bytes: bytes) -> float:
             edges.close()
             content_area.close()
 
-        # Darkness score (0-500). True dividers have mean ~5-20.
-        # Real dark items have mean ~30-80. Bright items have mean 100+.
-        # Also credit near-white (>230) since a flash-fired divider hits that.
-        if mean < 100:
-            darkness = max(0.0, 500.0 * (1.0 - mean / 100.0))
-        elif mean > 200:
-            darkness = max(0.0, 500.0 * ((mean - 200.0) / 55.0))
+        # v25.34: SHARPER scoring — award divider points only to photos that
+        # are UNAMBIGUOUSLY divider-like. v25.31 was too generous, giving
+        # moderately dark item photos scores competitive with true dividers.
+        # A real JnJ divider is essentially perfect black (mean<15) with
+        # near-zero variance (stddev<5) and near-zero edges (<1). We taper
+        # sharply so borderline dark item photos score much lower than true
+        # dividers even when they look kinda black.
+
+        # Darkness (0-500). Peaks at mean=0, cuts off at mean=30 (not 100).
+        # True dividers = mean 5-15 → score 250-420.
+        # Dark item photos = mean 30-60 → score 0-0. HUGE gap.
+        if mean < 30:
+            darkness = 500.0 * (1.0 - mean / 30.0)
+        elif mean > 220:
+            darkness = 500.0 * ((mean - 220.0) / 35.0)
         else:
             darkness = 0.0
 
-        # Flatness score (0-300). True dividers have stddev ~2-10.
-        # Real photos have stddev 30-80.
-        flatness = max(0.0, 300.0 * (1.0 - stddev / 40.0))
+        # Flatness (0-300). Peaks at stddev=0, cuts off at stddev=12.
+        # True dividers = stddev 1-5 → score 175-275.
+        # Dark item photos = stddev 15-40 → score 0. Gap.
+        flatness = max(0.0, 300.0 * (1.0 - stddev / 12.0))
 
-        # Blankness score (0-200). True dividers have edge_mean ~0.5-2.
-        # Real photos have edge_mean 15-50.
-        blankness = max(0.0, 200.0 * (1.0 - edge_mean / 10.0))
+        # Blankness (0-200). Peaks at edge_mean=0, cuts off at edge_mean=3.
+        # True dividers = edge_mean 0.2-1.5 → score 100-185.
+        # Dark item photos = edge_mean 5-20 → score 0. Gap.
+        blankness = max(0.0, 200.0 * (1.0 - edge_mean / 3.0))
 
         score = darkness + flatness + blankness
 
         try:
-            print(f"divider-score-v31: mean={mean:.1f} stddev={stddev:.1f} edge_mean={edge_mean:.2f} → score={score:.0f}", flush=True)
+            print(f"divider-score-v34: mean={mean:.1f} stddev={stddev:.1f} edge_mean={edge_mean:.2f} → score={score:.0f}", flush=True)
         except Exception:
             pass
 
