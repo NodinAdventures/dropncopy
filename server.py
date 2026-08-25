@@ -463,38 +463,42 @@ def is_blank_image(png_bytes: bytes, dark_ratio_threshold: float = 0.005) -> boo
         return False
 
 
-def is_divider_photo(image_bytes: bytes) -> bool:
-    """v25.28: Detect JnJ's branded divider photos.
+def compute_divider_score(image_bytes: bytes) -> float:
+    """v25.31: return a divider-ness score (0.0-1000.0), where higher = more
+    divider-like. Replaces the old boolean is_divider_photo.
 
-    CRITICAL FINDING (Aug 25 2026): JnJ burns a white 'JNJ ONLINE AUCTION
-    - FREMONT' watermark into the BOTTOM of EVERY photo they upload — both
-    real item photos and divider slides. That means:
-      - Divider photos aren't 'blank black'; they're black with white text.
-      - Naive mean/stddev on the whole image gets skewed by the watermark.
-      - Every photo has thousands of edge pixels from the text characters.
+    Why a score instead of a boolean:
+    Ashley's test found that FILE 13 038 (a real photo of a dark object,
+    slightly blurry) has almost the same pixel signature as a true JnJ
+    divider slide — dark, low variance, few edges. Any yes/no threshold
+    that catches true dividers will also catch FILE 13 038. Any threshold
+    that excludes FILE 13 038 will miss some true dividers.
 
-    Solution: crop the watermark strip out before measuring. We only look
-    at the TOP 80% of the image (the actual content area above the JnJ
-    watermark). A true divider will be near-monochrome in that region; a
-    real item photo will have color/edges/variation there.
+    BUT: we know exactly how many dividers should exist (item_count - 1).
+    So instead of guessing per-photo, the CLIENT takes the top-N scoring
+    photos as dividers where N = item_count - 1. This is self-correcting:
+    - if 55 photos look somewhat divider-like, the top 50 (true dividers)
+      score higher than the 5 borderline items and win
+    - if only 45 obvious dividers exist, the next 5 most-divider-like
+      get pulled in (rare, but the ordering still holds)
 
-    Returns True when the top-80% content area is:
-      - Dark (mean < 50) AND low variation (stddev < 30) — near-black divider
-      - OR Bright (mean > 220) AND low variation (stddev < 30) — near-white
-      - OR solid near-monochrome (stddev < 18) — any color, no detail
-      - OR near-zero edge density (< 5.0) — no content, watermark cropped out
+    Score components (all measured on the top 80% content area, cropping
+    out the JnJ watermark strip at the bottom):
+      - darkness_score: 500 max, peaks at mean=0, falls to 0 at mean=100
+      - flatness_score: 300 max, peaks at stddev=0, falls to 0 at stddev=40
+      - blankness_score: 200 max, peaks at edge_mean=0, falls to 0 at edge_mean=10
 
-    Deterministic, ~10ms per photo. Runs BEFORE the AI check so we never
-    burn a GPT call on a divider.
+    A pure black divider scores ~1000. A real item photo scores ~50-200.
+    A borderline dark photo like FILE 13 038 might score ~400-600 — still
+    lower than true dividers which will hit 850-1000.
     """
     try:
         from PIL import Image, ImageStat, ImageFilter
         with Image.open(io.BytesIO(image_bytes)) as img:
             gray = img.convert("L")
-            gray.thumbnail((256, 256))  # bigger thumb so 80% crop still meaningful
+            gray.thumbnail((256, 256))
             w, h = gray.size
-            # Crop out the bottom 20% — that's where the JnJ watermark lives.
-            # We only measure the actual content area above it.
+            # Crop bottom 20% (JnJ watermark) so it doesn't skew measurements.
             content_area = gray.crop((0, 0, w, int(h * 0.80)))
             gray.close()
 
@@ -502,47 +506,49 @@ def is_divider_photo(image_bytes: bytes) -> bool:
             mean = stat.mean[0]
             stddev = stat.stddev[0]
 
-            # Edge density on the CONTENT AREA only (watermark excluded).
-            # A divider slide will have ~0 edges here; a real photo has
-            # thousands of edges from the item, background clutter, etc.
             edges = content_area.filter(ImageFilter.FIND_EDGES)
             edge_stat = ImageStat.Stat(edges)
             edge_mean = edge_stat.mean[0]
             edges.close()
             content_area.close()
 
-        # Debug log so we can tune.
+        # Darkness score (0-500). True dividers have mean ~5-20.
+        # Real dark items have mean ~30-80. Bright items have mean 100+.
+        # Also credit near-white (>230) since a flash-fired divider hits that.
+        if mean < 100:
+            darkness = max(0.0, 500.0 * (1.0 - mean / 100.0))
+        elif mean > 200:
+            darkness = max(0.0, 500.0 * ((mean - 200.0) / 55.0))
+        else:
+            darkness = 0.0
+
+        # Flatness score (0-300). True dividers have stddev ~2-10.
+        # Real photos have stddev 30-80.
+        flatness = max(0.0, 300.0 * (1.0 - stddev / 40.0))
+
+        # Blankness score (0-200). True dividers have edge_mean ~0.5-2.
+        # Real photos have edge_mean 15-50.
+        blankness = max(0.0, 200.0 * (1.0 - edge_mean / 10.0))
+
+        score = darkness + flatness + blankness
+
         try:
-            print(f"divider-metrics-v28: mean={mean:.1f} stddev={stddev:.1f} edge_mean={edge_mean:.2f}", flush=True)
+            print(f"divider-score-v31: mean={mean:.1f} stddev={stddev:.1f} edge_mean={edge_mean:.2f} → score={score:.0f}", flush=True)
         except Exception:
             pass
 
-        # v25.30: tightened thresholds after v25.28 was over-detecting.
-        # Symptom: 57 blanks detected for 51 items (only 50 needed), and
-        # 7 real dark-background item photos (black frame on black surface,
-        # dark electronics) got flagged as dividers — causing photos to
-        # shift by 1+ items downstream.
-        #
-        # True JnJ divider = solid black content area + white watermark.
-        # In the top-80% crop the content is ALL BLACK, so:
-        #   - mean should be <25 (not just <50, which catches dark items)
-        #   - stddev should be <15 (not <30, which catches textured darks)
-        #   - edge_mean should be <3 (not <5, which catches slight noise)
-        # A real dark-background item photo has SOME edges/texture/variation
-        # in the content area. A blank divider has near-zero of all three.
-        #
-        # Require ALL THREE signals to agree — no single-signal shortcut.
-        # This dramatically reduces false positives while still catching
-        # any real divider (which will trivially pass all three).
-        if mean < 25 and stddev < 15 and edge_mean < 3.0:
-            return True
-        # Near-white content area (rare edge case — flash-fired hand cover).
-        # Keep tight to avoid catching photos of white items.
-        if mean > 230 and stddev < 15 and edge_mean < 3.0:
-            return True
-        return False
+        return score
     except Exception:
-        return False
+        return 0.0
+
+
+def is_divider_photo(image_bytes: bytes) -> bool:
+    """v25.31: kept as a compatibility shim. Uses compute_divider_score with
+    a very conservative threshold (700+) so the OLD callers only get
+    obvious dividers. Real detection is now score-based via top-N picking
+    in the client's cursor walk — see app.js.
+    """
+    return compute_divider_score(image_bytes) >= 700.0
 
 
 # --------------------- streaming endpoint ---------------------
@@ -1553,14 +1559,21 @@ async def jnj_match_photos(
             #   MAYBE = ambiguous close-up of texture/metal/wood/fabric
             # v19: 'maybe' photos wait for pass 2 (neighbor check).
             first_pass = "yes"
-            # v25.2: Cheap deterministic divider check FIRST. Dave's black
-            # divider photos are 100% caught by simple brightness/stddev math
-            # and never need to hit the AI. Photos that pass this check are
-            # still sent to the AI for the normal item/no-item classification.
-            if is_divider_photo(raw):
-                is_blank = True
-                first_pass = "no"
-                print(f"divider-check: {filename} classified as blank (monochrome)", flush=True)
+            # v25.31: score-based divider detection. Compute a 0-1000 score
+            # for every photo (higher = more divider-like) and return it to
+            # the client. Client picks the top (item_count - 1) as dividers.
+            # This is self-correcting against false positives like FILE 13 038
+            # (a real dark item photo whose signature overlaps with true
+            # dividers). We no longer set is_blank server-side based on
+            # score — the client does that after seeing all scores together.
+            divider_score = compute_divider_score(raw)
+            print(f"divider-check: {filename} score={divider_score:.0f}", flush=True)
+            # Only trigger the AI "is this an item" fallback on photos that
+            # scored VERY high (unambiguously divider-like). This keeps API
+            # cost the same as before.
+            if divider_score >= 850:
+                # Skip AI call — unambiguously a divider. Score alone decides.
+                pass
             elif ai_thumb_b64 and _OPENAI_KEY:
                 try:
                     resp = await client.chat.completions.create(
@@ -1599,7 +1612,10 @@ async def jnj_match_photos(
 
             if first_pass == "no":
                 is_blank = True
-            print(f"photo-classify: {filename} first_pass={first_pass} is_blank={is_blank}", flush=True)
+            # v25.31: is_blank is now only a HINT to the client. The final
+            # divider set is chosen by client-side top-N picking based on
+            # divider_score. is_blank stays populated for the debug log.
+            print(f"photo-classify: {filename} first_pass={first_pass} is_blank={is_blank} divider_score={divider_score:.0f}", flush=True)
             # NOTE: we intentionally KEEP ai_thumb_b64 around — it goes into the
             # returned dict so pass 2 can use it for neighbor comparison.
 
@@ -1615,6 +1631,9 @@ async def jnj_match_photos(
                 "dhash": "",
                 "is_blank": is_blank,
                 "first_pass": first_pass,  # 'yes' / 'no' / 'maybe'
+                # v25.31: raw divider-ness score (0-1000). Client sorts all
+                # photos by this and picks the top (item_count - 1) as dividers.
+                "divider_score": divider_score,
                 # ai_thumb_b64 is only sent back for 'maybe' photos to keep
                 # response size down. Client uses it to do a neighbor-check
                 # call to /api/jnj-resolve-maybe.

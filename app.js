@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-25-tighten-divider-detection-v25.30";
+const BUILD_ID = "2026-08-25-topn-divider-score-v25.31";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v25.30 boot. BUILD_ID:", "2026-08-25-tighten-divider-detection-v25.30");
+jnjLog("BOOT", "v25.31 boot. BUILD_ID:", "2026-08-25-topn-divider-score-v25.31");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -1085,7 +1085,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v25.30 · ${BUILD_ID}`;
+  badge.textContent = `v25.31 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
@@ -1497,40 +1497,67 @@ async function jnjHandleFiles(input) {
       }
     }
 
-    // v15/v19 matching: blank photos are hard delimiters between items.
-    // Dave's workflow: shoot item A photos → no-item photo → shoot item B
-    // photos → no-item photo → etc. We walk the photos in order, and
-    // every time we see is_blank=true, we advance the cursor by 1 item.
-    // Blank photos themselves are marked as skipped (not assigned to any item)
-    // so they don't clutter the output.
-    // v25.6: two fixes to the cursor walk:
-    //   1. Consecutive blank photos collapse into ONE cursor advance. If Dave
-    //      shoots a burst of 2-3 black frames, we still only move to the next
-    //      item once. Only a blank *following a real item photo* advances.
-    //   2. Only advance the cursor if the current item has already received
-    //      at least one photo. This means a leading blank (before any item
-    //      photos) does NOT skip item 1.
+    // v25.31: score-based top-N divider picking.
+    // Old approach (v25.28-30): server flagged each photo as is_blank based
+    // on hard thresholds. Photos like FILE 13 038 (a real photo of a dark
+    // object) got misclassified because their pixel signature overlaps with
+    // true dividers.
+    //
+    // New approach: server returns a 0-1000 divider_score for every photo.
+    // We know exactly how many dividers should exist (item_count - 1), so
+    // we pick the top N scoring photos as dividers. Self-correcting:
+    // - true dividers score 850-1000 (near-black content area)
+    // - borderline dark item photos score 400-600
+    // - if we detect too many candidates, the borderline ones lose to true
+    //   dividers and get treated as regular photos
+    // - if we detect too few, the next best candidates get pulled in
+    const expectedDividers = Math.max(0, items.length - 1);
+    const scoredPhotos = allPhotoInfos
+      .map((p, idx) => ({ p, idx, score: (typeof p.divider_score === "number" ? p.divider_score : (p.is_blank ? 700 : 0)) }))
+      .sort((a, b) => b.score - a.score);
+    // Pick top N as dividers. Use a minimum score floor of 300 so if a
+    // sale has FEWER dividers than expected (Dave forgot some), we don't
+    // start treating regular photos as dividers.
+    const dividerSet = new Set();
+    const MIN_DIVIDER_SCORE = 300;
+    for (let i = 0; i < expectedDividers && i < scoredPhotos.length; i++) {
+      const sp = scoredPhotos[i];
+      if (sp.score < MIN_DIVIDER_SCORE) break;
+      dividerSet.add(sp.idx);
+    }
+    // Log the score distribution so we can tune if needed.
+    jnjLog("DIVIDER-PICK",
+      `expected=${expectedDividers}`,
+      `picked=${dividerSet.size}`,
+      `top5_scores=[${scoredPhotos.slice(0, 5).map(s => s.score.toFixed(0)).join(",")}]`,
+      `bottom_of_picked=${scoredPhotos[dividerSet.size - 1]?.score.toFixed(0) || "n/a"}`,
+      `just_below=${scoredPhotos[dividerSet.size]?.score.toFixed(0) || "n/a"}`
+    );
+
+    // Now the cursor walk uses dividerSet instead of is_blank.
+    // v25.6: still collapses consecutive dividers and only advances if the
+    // current item has already received at least one photo, so a leading
+    // divider doesn't skip item 1.
     let cursor = 0;
     let blanksSeen = 0;
     let currentItemGotPhoto = false;
     const walkTrace = [];
-    for (const p of allPhotoInfos) {
-      if (p.is_blank) {
+    for (let i = 0; i < allPhotoInfos.length; i++) {
+      const p = allPhotoInfos[i];
+      const isPickedDivider = dividerSet.has(i);
+      if (isPickedDivider) {
         blanksSeen += 1;
-        // Only advance if we have at least one photo on the current item.
-        // Otherwise this blank is a leading/duplicate divider and we ignore it.
         if (currentItemGotPhoto && cursor + 1 < items.length) {
           cursor += 1;
           currentItemGotPhoto = false;
-          walkTrace.push(`${p.filename}=BLANK→item${cursor+1}`);
+          walkTrace.push(`${p.filename}=DIV→item${cursor+1}`);
         } else {
-          walkTrace.push(`${p.filename}=BLANK-skip`);
+          walkTrace.push(`${p.filename}=DIV-skip`);
         }
         p.item_num_match = "";
-        p.match_kind = "blank"; // special marker; won't be assigned or unmatched
+        p.match_kind = "blank";
         continue;
       }
-      // Regular photo — assign to current item.
       if (p.match_kind === "none") {
         p.item_num_match = itemNumByIndex[cursor] || "";
         p.match_kind = p.item_num_match ? "order" : "none";
@@ -1538,7 +1565,7 @@ async function jnjHandleFiles(input) {
         walkTrace.push(`${p.filename}→${p.item_num_match || "?"}`);
       }
     }
-    jnjLog("CURSOR-WALK", `photos=${allPhotoInfos.length}`, `blanks_detected=${blanksSeen}`, `final_cursor=${cursor}`, `total_items=${items.length}`);
+    jnjLog("CURSOR-WALK", `photos=${allPhotoInfos.length}`, `dividers_picked=${dividerSet.size}`, `final_cursor=${cursor}`, `total_items=${items.length}`);
     jnjLog("CURSOR-TRACE", walkTrace.join(" | "));
 
     // v25.30: reverted v25.29's AI verification pass. Ashley confirmed the
