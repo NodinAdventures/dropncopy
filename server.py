@@ -753,29 +753,21 @@ def build_jnj_csv_row(item_num: str, lot_code: str, description: str,
     row["Description"] = description
     # StartBid must have a value for auction listing format
     row["StartBid"] = "$1.00 "
-    # cf_SellerID priority:
-    #   1. per_item_seller (from the item's own sheet's boxed number) — wins if set,
-    #      because in multi-sheet drops each sheet has its own boxed seller #.
-    #      v25.22: if the boxed number is digits-only (e.g. '721') AND the user
-    #      supplied a letter prefix (e.g. 'AA'), prepend it → 'AA721'. If the
-    #      boxed number already contains letters (e.g. 'AA721' or 'BB44'), use
-    #      it as-is.
-    #   2. seller_id already has digits (like 'AA1961') -> use as-is for all rows
-    #   3. seller_id is a prefix only (like 'AA') -> append the sequence
+    # cf_SellerID (v25.23): ALWAYS "AA" + number, no exceptions.
+    # Ashley's rule: the ID Code column must always look like AA721, AA1000, etc.
+    # We take the number from (in order): the boxed sheet number, then the
+    # seller_id field if it has digits, then the seller_seq counter. Any letters
+    # on the number are stripped so we never end up with "AAAA721".
     per_item_seller = (per_item_seller or "").strip()
-    seller_prefix = "".join(c for c in (seller_id or "") if c.isalpha()).upper()
-    if per_item_seller:
-        has_letters = any(c.isalpha() for c in per_item_seller)
-        if not has_letters and seller_prefix:
-            row["cf_SellerID"] = f"{seller_prefix}{per_item_seller}"
-        else:
-            row["cf_SellerID"] = per_item_seller
-    elif seller_id and any(c.isdigit() for c in seller_id):
-        row["cf_SellerID"] = seller_id
-    elif seller_id:
-        row["cf_SellerID"] = f"{seller_id}{seller_seq}"
+    per_item_digits = "".join(c for c in per_item_seller if c.isdigit())
+    seller_id_digits = "".join(c for c in (seller_id or "") if c.isdigit())
+    if per_item_digits:
+        number = per_item_digits
+    elif seller_id_digits:
+        number = seller_id_digits
     else:
-        row["cf_SellerID"] = ""
+        number = str(seller_seq)
+    row["cf_SellerID"] = f"AA{number}"
     return row
 
 
