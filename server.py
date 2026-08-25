@@ -654,6 +654,11 @@ JNJ_DEFAULTS = {
     "StartBid": "$1.00 ",
     "BuyersPremiumPct": "10",
     "TaxPercent": "6",
+    # v25.15: J&J's importer rejected v25.14 with "Missing End Date or Duration"
+    # on every row (see IMG_2896/IMG_2897). Column V (Duration) is required
+    # when EndDate (col U) is blank. 7 days is J&J's typical auction run;
+    # frontend can override via the sale dialog.
+    "Duration": "7",
 }
 
 
