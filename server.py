@@ -25,6 +25,47 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 
+# v25.45: OpenCV for QR code divider detection. Import lazily so a
+# missing lib doesn't crash startup — photos just fall back to the
+# old pixel-scoring path if cv2 isn't available.
+try:
+    import cv2  # type: ignore
+    import numpy as np  # type: ignore
+    _HAS_CV2 = True
+    _QR_DETECTOR = cv2.QRCodeDetector()
+except Exception as _cv_err:
+    print(f"cv2 QR support disabled: {_cv_err}", flush=True)
+    _HAS_CV2 = False
+    _QR_DETECTOR = None
+
+
+def detect_divider_qr(raw_bytes: bytes) -> bool:
+    """Return True if this photo contains the printable DIVIDER card.
+
+    The card encodes the exact string 'DROPNCOPY-DIVIDER' (case-sensitive).
+    Uses OpenCV's built-in QRCodeDetector which handles rotation, mild
+    perspective distortion, and JPEG compression. High error-correction
+    on the card itself means wrinkles/shadows/glare are all fine.
+
+    Falls back to False silently if cv2 isn't available.
+    """
+    if not _HAS_CV2 or _QR_DETECTOR is None:
+        return False
+    try:
+        with Image.open(io.BytesIO(raw_bytes)) as img:
+            # Downscale huge photos before decode — QRCodeDetector is O(pixels).
+            # 1024px on the long side is plenty for a card that fills 1/3+ of frame.
+            gray = img.convert("L")
+            gray.thumbnail((1024, 1024))
+            arr = np.array(gray)
+            gray.close()
+        data, points, _ = _QR_DETECTOR.detectAndDecode(arr)
+        return bool(data) and "DROPNCOPY-DIVIDER" in data
+    except Exception as e:
+        print(f"QR detect failed: {type(e).__name__}: {e}", flush=True)
+        return False
+
+
 app = FastAPI()
 
 app.add_middleware(
@@ -1695,12 +1736,26 @@ async def jnj_match_photos(
             # (a real dark item photo whose signature overlaps with true
             # dividers). We no longer set is_blank server-side based on
             # score — the client does that after seeing all scores together.
-            divider_score = compute_divider_score(raw)
-            print(f"divider-check: {filename} score={divider_score:.0f}", flush=True)
+            # v25.45: QR-code divider card is the AUTHORITATIVE signal.
+            # If Dave shot the printed DIVIDER card, we know 100% that this
+            # is a divider. Skip pixel scoring AND the AI call entirely,
+            # slam divider_score to 1000 so the client picks it every time.
+            has_divider_qr = detect_divider_qr(raw)
+            if has_divider_qr:
+                divider_score = 1000.0
+                first_pass = "no"
+                is_blank = True
+                print(f"divider-QR: {filename} DIVIDER CARD DETECTED — forcing divider", flush=True)
+            else:
+                divider_score = compute_divider_score(raw)
+                print(f"divider-check: {filename} score={divider_score:.0f}", flush=True)
             # Only trigger the AI "is this an item" fallback on photos that
             # scored VERY high (unambiguously divider-like). This keeps API
             # cost the same as before.
-            if divider_score >= 850:
+            if has_divider_qr:
+                # Already decided by QR — skip everything below.
+                pass
+            elif divider_score >= 850:
                 # Skip AI call — unambiguously a divider. Score alone decides.
                 pass
             elif ai_thumb_b64 and _OPENAI_KEY:
@@ -1772,6 +1827,11 @@ async def jnj_match_photos(
                 # v25.31: raw divider-ness score (0-1000). Client sorts all
                 # photos by this and picks the top (item_count - 1) as dividers.
                 "divider_score": divider_score,
+                # v25.45: authoritative QR signal. When true, the client
+                # adds this photo to dividerSet unconditionally — no score
+                # comparison, no per-sheet limit. This lets Dave shoot MORE
+                # divider cards than the sheet has items and still be right.
+                "has_divider_qr": has_divider_qr,
                 # ai_thumb_b64 is only sent back for 'maybe' photos to keep
                 # response size down. Client uses it to do a neighbor-check
                 # call to /api/jnj-resolve-maybe.

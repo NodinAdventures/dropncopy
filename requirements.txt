@@ -4,3 +4,7 @@ python-multipart>=0.0.9
 openai>=1.40
 pymupdf>=1.24
 pillow>=10.0
+# v25.45: OpenCV headless for QR code detection (built-in QRCodeDetector).
+# No system libs needed, works on Render's default Python container.
+opencv-python-headless>=4.8
+numpy>=1.24

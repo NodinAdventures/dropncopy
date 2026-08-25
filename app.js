@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-25-proportional-per-sheet-picking-v25.44";
+const BUILD_ID = "2026-08-25-qr-divider-card-v25.45";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v25.44 boot. BUILD_ID:", "2026-08-25-proportional-per-sheet-picking-v25.44");
+jnjLog("BOOT", "v25.45 boot. BUILD_ID:", "2026-08-25-qr-divider-card-v25.45");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -1085,7 +1085,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v25.44 · ${BUILD_ID}`;
+  badge.textContent = `v25.45 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
@@ -1560,6 +1560,20 @@ async function jnjHandleFiles(input) {
     }
 
     const dividerSet = new Set();
+    // v25.45: QR-code divider cards are AUTHORITATIVE. If a photo has the
+    // printed DROPNCOPY-DIVIDER card in it, we KNOW 100% it's a divider —
+    // no scoring, no thresholds, no AI. Add these to dividerSet up front,
+    // BEFORE the score-based competition. They don't count against any
+    // sheet's expected-divider limit either — if Dave shoots 20 divider
+    // cards for a 14-item sheet, all 20 are dividers.
+    let qrDividerCount = 0;
+    for (let i = 0; i < allPhotoInfos.length; i++) {
+      if (allPhotoInfos[i].has_divider_qr === true) {
+        dividerSet.add(i);
+        qrDividerCount++;
+      }
+    }
+
     // v25.39: with per-sheet picking, borderline candidates only compete
     // against other photos in the SAME sheet, not against every very-dark
     // item photo in the whole build. Lower the floor to 200 so faint-
@@ -1671,7 +1685,7 @@ async function jnjHandleFiles(input) {
       perGroupLogs.push(`GLOBAL 1-sheet: folders=${foldersInOrder.length} sheets=${sheetIdxsInOrder.length} items=${items.length} picked=${dividerSet.size}/${expectedDividers}`);
     }
 
-    jnjLog("DIVIDER-PICK-v39", `total_picked=${dividerSet.size}`, `expected=${Math.max(0, items.length - 1)}`, `rescued=${totalRescued}`);
+    jnjLog("DIVIDER-PICK-v45", `total_picked=${dividerSet.size}`, `qr_dividers=${qrDividerCount}`, `expected=${Math.max(0, items.length - 1)}`, `rescued=${totalRescued}`);
     for (const line of perGroupLogs) jnjLog("DIVIDER-GROUP", line);
 
     // Now the cursor walk uses dividerSet instead of is_blank.
