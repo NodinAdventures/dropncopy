@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-25-server-sets-match-kind-v25.43";
+const BUILD_ID = "2026-08-25-proportional-per-sheet-picking-v25.44";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v25.43 boot. BUILD_ID:", "2026-08-25-server-sets-match-kind-v25.43");
+jnjLog("BOOT", "v25.44 boot. BUILD_ID:", "2026-08-25-proportional-per-sheet-picking-v25.44");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -1085,7 +1085,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v25.43 · ${BUILD_ID}`;
+  badge.textContent = `v25.44 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
@@ -1622,8 +1622,44 @@ async function jnjHandleFiles(input) {
         }
         perGroupLogs.push(`sheet${sheetIdx}(${folder||"root"}): items=${groupItems.length} photos=${photoIdxs.length} expected=${expected} picked=${picked} top3=[${scored.slice(0,3).map(s=>s.score.toFixed(0)).join(",")}]`);
       }
+    } else if (sheetIdxsInOrder.length > 1) {
+      // v25.44: Ashley usually drops ALL photos in one flat folder covering
+      // many sheets. Previously we fell through to a GLOBAL top-N pick,
+      // which lets a very-dark item photo in sheet 6 outrank a real but
+      // faint divider in sheet 13. Instead, split the photo timeline into
+      // contiguous chunks proportional to each sheet's item count, then
+      // pick top-(items-1) dividers PER CHUNK. Guarantees each sheet gets
+      // exactly the dividers it needs, from within its own photos.
+      const totalPhotos = allPhotoInfos.length;
+      const totalItems = items.length;
+      let photoStart = 0;
+      for (let g = 0; g < sheetIdxsInOrder.length; g++) {
+        const sheetIdx = sheetIdxsInOrder[g];
+        const groupItems = itemsBySheet.get(sheetIdx) || [];
+        // Proportional slice: this sheet gets its share of photos by item count.
+        const isLast = g === sheetIdxsInOrder.length - 1;
+        const shareCount = isLast
+          ? (totalPhotos - photoStart)
+          : Math.round((groupItems.length / totalItems) * totalPhotos);
+        const photoEnd = Math.min(photoStart + shareCount, totalPhotos);
+        const chunkIdxs = [];
+        for (let i = photoStart; i < photoEnd; i++) chunkIdxs.push(i);
+        const expected = Math.max(0, groupItems.length - 1);
+        const scored = chunkIdxs
+          .map(idx => ({ idx, score: scoreByIdx.get(idx) || 0 }))
+          .sort((a, b) => b.score - a.score);
+        let picked = 0;
+        for (let i = 0; i < expected && i < scored.length; i++) {
+          if (scored[i].score < MIN_DIVIDER_SCORE) break;
+          dividerSet.add(scored[i].idx);
+          picked++;
+        }
+        perGroupLogs.push(`sheet${sheetIdx}(chunk ${photoStart}-${photoEnd-1}): items=${groupItems.length} photos=${chunkIdxs.length} expected=${expected} picked=${picked} top3=[${scored.slice(0,3).map(s=>`${s.idx}:${s.score.toFixed(0)}`).join(",")}]`);
+        photoStart = photoEnd;
+      }
+      perGroupLogs.push(`PROPORTIONAL v25.44: folders=${foldersInOrder.length} sheets=${sheetIdxsInOrder.length} items=${items.length} picked=${dividerSet.size}/${Math.max(0, items.length - 1)}`);
     } else {
-      // Fallback: global pick like v25.38.
+      // True fallback: only 1 sheet total, so 1 global chunk anyway.
       const expectedDividers = Math.max(0, items.length - 1);
       const scoredPhotos = allPhotoInfos
         .map((p, idx) => ({ idx, score: scoreByIdx.get(idx) || 0 }))
@@ -1632,7 +1668,7 @@ async function jnjHandleFiles(input) {
         if (scoredPhotos[i].score < MIN_DIVIDER_SCORE) break;
         dividerSet.add(scoredPhotos[i].idx);
       }
-      perGroupLogs.push(`GLOBAL fallback: folders=${foldersInOrder.length} sheets=${sheetIdxsInOrder.length} items=${items.length} picked=${dividerSet.size}/${expectedDividers}`);
+      perGroupLogs.push(`GLOBAL 1-sheet: folders=${foldersInOrder.length} sheets=${sheetIdxsInOrder.length} items=${items.length} picked=${dividerSet.size}/${expectedDividers}`);
     }
 
     jnjLog("DIVIDER-PICK-v39", `total_picked=${dividerSet.size}`, `expected=${Math.max(0, items.length - 1)}`, `rescued=${totalRescued}`);
