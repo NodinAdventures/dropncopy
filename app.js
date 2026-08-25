@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-25-photo-attach-debug-v25.18";
+const BUILD_ID = "2026-08-25-file-lookup-fix-v25.19";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v25.18 boot. BUILD_ID:", "2026-08-25-photo-attach-debug-v25.18");
+jnjLog("BOOT", "v25.19 boot. BUILD_ID:", "2026-08-25-file-lookup-fix-v25.19");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -1054,7 +1054,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v25.18 · ${BUILD_ID}`;
+  badge.textContent = `v25.19 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
@@ -1514,13 +1514,43 @@ async function jnjHandleFiles(input) {
     // v25: was `[sheet, ...photos]` (singular sheet from pre-v23) — v23 renamed to
     // `sheets` (array) but this line was missed, causing a ReferenceError at the
     // very end of the build after all photos matched. Now uses the sheets array.
+    // v25.19: server may return a filename with a folder prefix (e.g.
+    // "2026-08-21 TEST/TEST 001.JPG") even though the original File object
+    // only has the leaf name ("TEST 001.JPG"). Index by BOTH the full name
+    // and the leaf so the lookup always finds the File. Case-insensitive
+    // as a final safety net.
     const filesByName = new Map();
-    for (const f of [...sheets, ...photos]) filesByName.set(f.name, f);
+    for (const f of [...sheets, ...photos]) {
+      if (!f || !f.name) continue;
+      filesByName.set(f.name, f);
+      filesByName.set(f.name.toLowerCase(), f);
+      const leaf = f.name.split("/").pop();
+      if (leaf && leaf !== f.name) {
+        filesByName.set(leaf, f);
+        filesByName.set(leaf.toLowerCase(), f);
+      }
+    }
+    function lookupFile(name) {
+      if (!name) return null;
+      let hit = filesByName.get(name);
+      if (hit) return hit;
+      hit = filesByName.get(name.toLowerCase());
+      if (hit) return hit;
+      const leaf = name.split("/").pop();
+      if (leaf && leaf !== name) {
+        hit = filesByName.get(leaf) || filesByName.get(leaf.toLowerCase());
+        if (hit) return hit;
+      }
+      return null;
+    }
     const photoMap = new Map();
+    let fileMissCount = 0;
     for (const p of allPhotoInfos) {
+      const fileHit = lookupFile(p.filename);
+      if (!fileHit) fileMissCount++;
       photoMap.set(p.filename, {
         id: p.id,
-        file: filesByName.get(p.filename) || null,
+        file: fileHit || null,
         thumb: p.thumb_data_url,
         tag_read: p.tag_read,
         description_read: p.description_read,
@@ -1529,6 +1559,9 @@ async function jnjHandleFiles(input) {
         dhash: p.dhash || "",
         is_blank: p.is_blank || false,
       });
+    }
+    if (fileMissCount > 0) {
+      jnjLog("FILE-LOOKUP-MISS", `${fileMissCount} of ${allPhotoInfos.length} photos could not resolve to a File object; first few names:`, allPhotoInfos.slice(0, 5).map(p => p.filename).join(" | "));
     }
     const itemPhotos = {};
     const unmatched = [];
