@@ -517,17 +517,28 @@ def is_divider_photo(image_bytes: bytes) -> bool:
         except Exception:
             pass
 
-        # Near-black content area (typical black divider slide).
-        if mean < 50 and stddev < 30:
+        # v25.30: tightened thresholds after v25.28 was over-detecting.
+        # Symptom: 57 blanks detected for 51 items (only 50 needed), and
+        # 7 real dark-background item photos (black frame on black surface,
+        # dark electronics) got flagged as dividers — causing photos to
+        # shift by 1+ items downstream.
+        #
+        # True JnJ divider = solid black content area + white watermark.
+        # In the top-80% crop the content is ALL BLACK, so:
+        #   - mean should be <25 (not just <50, which catches dark items)
+        #   - stddev should be <15 (not <30, which catches textured darks)
+        #   - edge_mean should be <3 (not <5, which catches slight noise)
+        # A real dark-background item photo has SOME edges/texture/variation
+        # in the content area. A blank divider has near-zero of all three.
+        #
+        # Require ALL THREE signals to agree — no single-signal shortcut.
+        # This dramatically reduces false positives while still catching
+        # any real divider (which will trivially pass all three).
+        if mean < 25 and stddev < 15 and edge_mean < 3.0:
             return True
-        # Near-white content area (rare, but possible).
-        if mean > 220 and stddev < 30:
-            return True
-        # Solid single-color content area at any brightness.
-        if stddev < 18:
-            return True
-        # Very low edge density in content area — blank slide with just the watermark.
-        if edge_mean < 5.0:
+        # Near-white content area (rare edge case — flash-fired hand cover).
+        # Keep tight to avoid catching photos of white items.
+        if mean > 230 and stddev < 15 and edge_mean < 3.0:
             return True
         return False
     except Exception:
