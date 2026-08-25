@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-25-neighbor-rescue-v25.38";
+const BUILD_ID = "2026-08-25-per-sheet-divider-pick-v25.39";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v25.38 boot. BUILD_ID:", "2026-08-25-neighbor-rescue-v25.38");
+jnjLog("BOOT", "v25.39 boot. BUILD_ID:", "2026-08-25-per-sheet-divider-pick-v25.39");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -1085,7 +1085,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v25.38 · ${BUILD_ID}`;
+  badge.textContent = `v25.39 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
@@ -1511,78 +1511,127 @@ async function jnjHandleFiles(input) {
     // - if we detect too many candidates, the borderline ones lose to true
     //   dividers and get treated as regular photos
     // - if we detect too few, the next best candidates get pulled in
-    const expectedDividers = Math.max(0, items.length - 1);
-    const scoredPhotos = allPhotoInfos
-      .map((p, idx) => ({ p, idx, score: (typeof p.divider_score === "number" ? p.divider_score : (p.is_blank ? 700 : 0)) }))
-      .sort((a, b) => b.score - a.score);
-    // Pick top N as dividers. Use a minimum score floor of 300 so if a
-    // sale has FEWER dividers than expected (Dave forgot some), we don't
-    // start treating regular photos as dividers.
-    const dividerSet = new Set();
-    // v25.34: server scoring got sharper, so raise the floor. True JnJ
-    // dividers now score 500-900; borderline dark item photos score <150.
-    const MIN_DIVIDER_SCORE = 400;
-    for (let i = 0; i < expectedDividers && i < scoredPhotos.length; i++) {
-      const sp = scoredPhotos[i];
-      if (sp.score < MIN_DIVIDER_SCORE) break;
-      dividerSet.add(sp.idx);
-    }
-
-    // v25.38: NEIGHBOR RESCUE.
-    // If we picked fewer dividers than expected (item_count - 1), some
-    // true divider photo scored below MIN_DIVIDER_SCORE — the pixel-only
-    // signal wasn't enough for that one photo. Ashley's ask: look at
-    // neighboring photos to decide if a borderline photo is really a
-    // divider.
+    // v25.39: pick dividers PER SHEET/FOLDER instead of globally.
     //
-    // A true divider sits BETWEEN two real content photos. So any
-    // borderline photo (score 100-400, the grey zone) whose immediate
-    // neighbors on both sides scored LOW (< 150 = clearly content) is
-    // very likely a divider we missed. We rescue those in score order
-    // until we hit the expected count.
-    if (dividerSet.size < expectedDividers) {
-      const scoreByIdx = new Map(scoredPhotos.map(s => [s.idx, s.score]));
-      const rescueCandidates = [];
-      for (const sp of scoredPhotos) {
-        if (dividerSet.has(sp.idx)) continue;
-        if (sp.score < 100) continue;   // clearly a content photo
-        if (sp.score >= MIN_DIVIDER_SCORE) continue; // already picked above
-        const prevIdx = sp.idx - 1;
-        const nextIdx = sp.idx + 1;
-        const prevScore = prevIdx >= 0 ? (scoreByIdx.get(prevIdx) ?? 999) : -1;
-        const nextScore = nextIdx < allPhotoInfos.length ? (scoreByIdx.get(nextIdx) ?? 999) : -1;
-        // Neighbors must look like content (low score). Treat missing
-        // neighbors (first/last photo) as content-like too.
-        const prevIsContent = prevScore < 150 || prevScore === -1;
-        const nextIsContent = nextScore < 150 || nextScore === -1;
-        // Don't rescue photos adjacent to an already-picked divider (that
-        // means the divider run is already accounted for).
-        const prevIsDivider = dividerSet.has(prevIdx);
-        const nextIsDivider = dividerSet.has(nextIdx);
-        if (prevIsContent && nextIsContent && !prevIsDivider && !nextIsDivider) {
-          rescueCandidates.push(sp);
-        }
-      }
-      // Rescue in score order, highest first, until we hit expected.
-      const rescued = [];
-      for (const sp of rescueCandidates) {
-        if (dividerSet.size >= expectedDividers) break;
-        dividerSet.add(sp.idx);
-        rescued.push(`idx=${sp.idx} score=${sp.score.toFixed(0)} file=${allPhotoInfos[sp.idx]?.filename || "?"}`);
-      }
-      if (rescued.length > 0) {
-        jnjLog("DIVIDER-RESCUE", `rescued ${rescued.length} via neighbor context:`, rescued.join(" | "));
-      }
+    // Ashley found that FILE 13 156 (a perfect-black landscape divider)
+    // was NOT ending up in the dividerSet despite scoring 1000. Why:
+    // we were picking the top 50 dividers across ALL 282 photos globally.
+    // If one sheet's items include several very-dark item photos, they
+    // can crowd out another sheet's real dividers when we only pick 50
+    // total.
+    //
+    // Fix: group photos by folder path (each JnJ upload folder = one
+    // sheet), and for each folder pick top-(itemCount-1) dividers. This
+    // is self-correcting because each folder's item count comes from the
+    // sheet's parsed items and its photos come from the matching upload.
+    function folderKey(filename) {
+      // '2026-08-25 FILE 13/FILE 13 156.JPG' → '2026-08-25 FILE 13'
+      // 'FILE 13 156.JPG' (no folder) → '' (all such photos share one group)
+      const idx = (filename || "").lastIndexOf("/");
+      return idx > 0 ? filename.slice(0, idx) : "";
     }
 
-    // Log the score distribution so we can tune if needed.
-    jnjLog("DIVIDER-PICK",
-      `expected=${expectedDividers}`,
-      `picked=${dividerSet.size}`,
-      `top5_scores=[${scoredPhotos.slice(0, 5).map(s => s.score.toFixed(0)).join(",")}]`,
-      `bottom_of_picked=${scoredPhotos[dividerSet.size - 1]?.score.toFixed(0) || "n/a"}`,
-      `just_below=${scoredPhotos[dividerSet.size]?.score.toFixed(0) || "n/a"}`
-    );
+    // Bucket photos and items by folder.
+    // Items don't carry a folder; they carry sheet_index. Photos don't carry
+    // sheet_index. We match on ORDER: sheets are processed in upload order,
+    // and photos are grouped by folder in upload order. So sheet_index 0
+    // corresponds to the first unique folder seen, sheet_index 1 to the
+    // second, etc.
+    const foldersInOrder = [];
+    const photosByFolder = new Map();
+    for (let i = 0; i < allPhotoInfos.length; i++) {
+      const fk = folderKey(allPhotoInfos[i].filename);
+      if (!photosByFolder.has(fk)) {
+        photosByFolder.set(fk, []);
+        foldersInOrder.push(fk);
+      }
+      photosByFolder.get(fk).push(i);
+    }
+    // Group items by sheet_index in the order they appear.
+    const sheetIdxsInOrder = [];
+    const itemsBySheet = new Map();
+    for (const it of items) {
+      const si = (typeof it.sheet_index === "number") ? it.sheet_index : 0;
+      if (!itemsBySheet.has(si)) {
+        itemsBySheet.set(si, []);
+        sheetIdxsInOrder.push(si);
+      }
+      itemsBySheet.get(si).push(it);
+    }
+
+    const dividerSet = new Set();
+    // v25.39: with per-sheet picking, borderline candidates only compete
+    // against other photos in the SAME sheet, not against every very-dark
+    // item photo in the whole build. Lower the floor to 200 so faint-
+    // watermark dividers (like FILE 13 156 that Ashley flagged — real
+    // divider with watermark barely visible in file explorer, scoring
+    // around 300) get picked when the sheet needs them.
+    const MIN_DIVIDER_SCORE = 200;
+    const scoreByIdx = new Map();
+    for (let i = 0; i < allPhotoInfos.length; i++) {
+      const p = allPhotoInfos[i];
+      const s = (typeof p.divider_score === "number" ? p.divider_score : (p.is_blank ? 700 : 0));
+      scoreByIdx.set(i, s);
+    }
+
+    // Pair each folder to a sheet by ORDER. If counts don't align (e.g.
+    // user dropped everything into one giant folder), fall back to a
+    // single global bucket.
+    const perGroupLogs = [];
+    let totalRescued = 0;
+    const bucketCount = Math.min(foldersInOrder.length, sheetIdxsInOrder.length);
+    if (bucketCount > 0 && foldersInOrder.length === sheetIdxsInOrder.length) {
+      for (let g = 0; g < bucketCount; g++) {
+        const folder = foldersInOrder[g];
+        const sheetIdx = sheetIdxsInOrder[g];
+        const photoIdxs = photosByFolder.get(folder) || [];
+        const groupItems = itemsBySheet.get(sheetIdx) || [];
+        const expected = Math.max(0, groupItems.length - 1);
+        const scored = photoIdxs
+          .map(idx => ({ idx, score: scoreByIdx.get(idx) || 0 }))
+          .sort((a, b) => b.score - a.score);
+        let picked = 0;
+        for (let i = 0; i < expected && i < scored.length; i++) {
+          if (scored[i].score < MIN_DIVIDER_SCORE) break;
+          dividerSet.add(scored[i].idx);
+          picked++;
+        }
+        // Neighbor rescue within this group only.
+        if (picked < expected) {
+          for (const sp of scored) {
+            if (picked >= expected) break;
+            if (dividerSet.has(sp.idx)) continue;
+            if (sp.score < 100 || sp.score >= MIN_DIVIDER_SCORE) continue;
+            const prevIdx = sp.idx - 1;
+            const nextIdx = sp.idx + 1;
+            const prevScore = prevIdx >= 0 ? (scoreByIdx.get(prevIdx) ?? 999) : -1;
+            const nextScore = nextIdx < allPhotoInfos.length ? (scoreByIdx.get(nextIdx) ?? 999) : -1;
+            const prevOk = (prevScore < 150 || prevScore === -1) && !dividerSet.has(prevIdx);
+            const nextOk = (nextScore < 150 || nextScore === -1) && !dividerSet.has(nextIdx);
+            if (prevOk && nextOk) {
+              dividerSet.add(sp.idx);
+              picked++;
+              totalRescued++;
+            }
+          }
+        }
+        perGroupLogs.push(`sheet${sheetIdx}(${folder||"root"}): items=${groupItems.length} photos=${photoIdxs.length} expected=${expected} picked=${picked} top3=[${scored.slice(0,3).map(s=>s.score.toFixed(0)).join(",")}]`);
+      }
+    } else {
+      // Fallback: global pick like v25.38.
+      const expectedDividers = Math.max(0, items.length - 1);
+      const scoredPhotos = allPhotoInfos
+        .map((p, idx) => ({ idx, score: scoreByIdx.get(idx) || 0 }))
+        .sort((a, b) => b.score - a.score);
+      for (let i = 0; i < expectedDividers && i < scoredPhotos.length; i++) {
+        if (scoredPhotos[i].score < MIN_DIVIDER_SCORE) break;
+        dividerSet.add(scoredPhotos[i].idx);
+      }
+      perGroupLogs.push(`GLOBAL fallback: folders=${foldersInOrder.length} sheets=${sheetIdxsInOrder.length} items=${items.length} picked=${dividerSet.size}/${expectedDividers}`);
+    }
+
+    jnjLog("DIVIDER-PICK-v39", `total_picked=${dividerSet.size}`, `expected=${Math.max(0, items.length - 1)}`, `rescued=${totalRescued}`);
+    for (const line of perGroupLogs) jnjLog("DIVIDER-GROUP", line);
 
     // Now the cursor walk uses dividerSet instead of is_blank.
     // v25.6: still collapses consecutive dividers and only advances if the
