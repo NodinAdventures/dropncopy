@@ -1472,25 +1472,10 @@ async def jnj_match_photos(
                             "role": "user",
                             "content": [
                                 {"type": "text", "text": (
-                                    "Classify this auction-sale photo. In this workflow the photographer "
-                                    "takes a WIDE full shot of each item, then sometimes takes CLOSE-UP "
-                                    "detail shots of a small part of that same item (label, knob, wheel, "
-                                    "drawer, texture, part of a wooden leg, corner of fabric, etc.). "
-                                    "You must distinguish a full-item shot from a close-up detail.\n\n"
-                                    "Reply with EXACTLY one word:\n\n"
-                                    "YES   - a WIDE shot where you can see most or all of an identifiable "
-                                    "        auction item (a whole chair, whole tool, whole appliance, "
-                                    "        whole vehicle, whole box of goods, etc.). Must be identifiable "
-                                    "        on its own as a specific item type.\n\n"
-                                    "NO    - clearly contains NO item: a hand/finger over lens, a floor/"
-                                    "        carpet/wall/ceiling/sky with nothing else, an all-black or "
-                                    "        all-white frame, a completely blurry shot, or an empty room.\n\n"
-                                    "MAYBE - a CLOSE-UP or PARTIAL view. You can see some material, texture, "
-                                    "        part, edge, wheel, drawer, corner, seam, hardware, label, or "
-                                    "        surface, but you CANNOT identify what the whole item is from "
-                                    "        this shot alone. If you'd have to guess what the item is, it's "
-                                    "        a MAYBE, not a YES. Be strict: when in doubt between YES and "
-                                    "        MAYBE, choose MAYBE.\n\n"
+                                    "Classify this auction-sale photo. Reply with EXACTLY one word:\n\n"
+                                    "YES   - clearly contains an auction item (furniture, tool, collectible, appliance, vehicle, box of goods, etc.).\n"
+                                    "NO    - clearly contains NO item: a hand/finger over lens, a floor/carpet/wall/ceiling/sky with nothing else, an all-black or all-white frame, or a completely blurry shot.\n"
+                                    "MAYBE - ambiguous close-up of a texture, surface, part, or detail (metal, wood grain, fabric, wheel, drawer, hardware) that COULD be part of an item nearby but isn't identifiable on its own.\n\n"
                                     "Answer only: YES, NO, or MAYBE."
                                 )},
                                 {"type": "image_url", "image_url": {
@@ -1636,24 +1621,17 @@ async def jnj_resolve_maybe(
 
     content: List[Dict] = [
         {"type": "text", "text": (
-            "You are helping sort auction-sale photos. The FIRST image is a "
-            "CLOSE-UP or PARTIAL photo being classified. The remaining images "
-            "are photos taken right before and/or after it in the same shoot "
-            "— they are the neighbors and each contains a full auction item.\n\n"
-            "Your job: decide if the FIRST photo is a CLOSE-UP DETAIL of the "
-            "SAME PHYSICAL ITEM shown in one of the neighbors.\n\n"
-            "Look for concrete matching evidence:\n"
-            "- Same material AND same color as the neighbor item (e.g. the "
-            "  neighbor is a red rocker and this is a close-up of red fabric).\n"
-            "- Same texture pattern (wood grain, metal finish, fabric weave).\n"
-            "- Same hardware style (drawer pull, wheel, hinge, label).\n"
-            "- Clearly a subset of the neighbor's item.\n\n"
-            "Reply with ONE word:\n"
-            "- 'item'  - you can SEE the close-up matches the neighbor item "
-            "  in material/color/pattern/hardware. Real close-up of same lot.\n"
-            "- 'blank' - it's a divider shot (hand, floor, wall, sky, all-"
-            "  black, all-white, or a texture that does NOT visibly match the "
-            "  neighbor item's material/color). When in doubt, choose 'blank'."
+            "You are helping sort auction-sale photos. The FIRST image is the "
+            "photo being classified. The remaining images are photos taken "
+            "right before and/or after it in the same shoot — all confirmed "
+            "to contain auction items.\n\n"
+            "Question: is the FIRST photo a close-up detail of the SAME item "
+            "shown in the neighbor photos, or is it a divider/blank photo "
+            "(hand, floor, wall, texture with no item present, etc.)?\n\n"
+            "Answer ONLY 'item' if it appears to be a close-up of the same "
+            "item shown nearby (wagon wheel, tool blade, drawer, fabric of "
+            "the same piece, etc.).\n"
+            "Answer ONLY 'blank' if it's a divider photo with no item."
         )},
         {"type": "image_url", "image_url": {
             "url": f"data:image/jpeg;base64,{subject_b64}",
@@ -1667,24 +1645,21 @@ async def jnj_resolve_maybe(
         }})
 
     try:
-        # v25.3: full gpt-4o here instead of mini. This runs only for MAYBE
-        # photos, not every photo — so cost is bounded. Full 4o is much better
-        # at fine-grained material/color matching between a close-up and its
-        # neighbor item, which is exactly what this check needs.
+        # v25.5: back to gpt-4o-mini for speed. v25.3's full gpt-4o here was
+        # causing the pipeline to hang because every close-up now went
+        # through this endpoint AND took several seconds each.
         resp = await client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-4o-mini",
             messages=[{"role": "user", "content": content}],
             max_tokens=5,
             temperature=0,
         )
         answer = (resp.choices[0].message.content or "").strip().lower()
-        print(f"resolve-maybe raw response: {answer!r}", flush=True)
         is_item = not answer.startswith("b")  # blank -> not item
         return JSONResponse({"is_item": is_item})
     except Exception as e:
         print(f"resolve-maybe failed: {type(e).__name__}: {e}", flush=True)
-        # Safe default — if AI fails, keep the photo attached (don't create a
-        # fake divider that would break the item split).
+        # Safe default — if AI fails, keep the photo.
         return JSONResponse({"is_item": True})
 
 

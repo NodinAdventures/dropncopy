@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-25-seller-groups-v25.4";
+const BUILD_ID = "2026-08-25-revert-photo-prompts-v25.5";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v25.4 boot. BUILD_ID:", "2026-08-25-seller-groups-v25.4");
+jnjLog("BOOT", "v25.5 boot. BUILD_ID:", "2026-08-25-revert-photo-prompts-v25.5");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -1054,7 +1054,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v25.4 · ${BUILD_ID}`;
+  badge.textContent = `v25.5 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
@@ -1404,13 +1404,19 @@ async function jnjHandleFiles(input) {
         const url = "__PORT_5000__".startsWith("__")
           ? "/api/jnj-resolve-maybe"
           : "__PORT_5000__/api/jnj-resolve-maybe";
-        const res = await fetch(url, { method: "POST", body: fd });
+        // v25.5: hard 12s timeout per photo so a slow OpenAI call can't
+        // stall the whole build. Safe default on abort = keep the photo.
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 12000);
+        const res = await fetch(url, { method: "POST", body: fd, signal: controller.signal });
+        clearTimeout(timer);
         const j = await res.json();
         p.is_blank = !j.is_item;
         jnjLog("MAYBE-RESOLVED", `filename=${p.filename}`, `neighbors=${neighborThumbs.length}`, `verdict=${j.is_item ? "item" : "blank"}`);
       } catch (e) {
-        console.warn("resolve-maybe failed for", p.filename, e);
+        console.warn("resolve-maybe failed for", p.filename, e && e.message);
         p.is_blank = false;  // safe default — keep the photo
+        jnjLog("MAYBE-FAILED", `filename=${p.filename}`, `reason=${e && e.message}`);
       }
       // Free memory — don't need the b64 anymore.
       p.ai_thumb_b64 = "";
