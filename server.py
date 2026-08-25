@@ -948,21 +948,35 @@ async def extract_seller_number(image_bytes: bytes, media_type: str) -> str:
         return ""
     try:
         b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
+        # v25.1: upgraded to gpt-4o (from mini) for the boxed-number extraction.
+        # gpt-4o-mini was missing hand-drawn boxes in Dave's real sheets — the
+        # cost delta is negligible (one call per sheet) and full 4o reads
+        # handwriting inside marker boxes far more reliably.
+        # Prompt is also stricter and shows the model concrete examples of
+        # what the boxes look like (e.g. "06", "1894", "2860").
         resp = await client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4o",
             max_tokens=15,
             temperature=0,
             messages=[{
                 "role": "user",
                 "content": [
                     {"type": "text", "text": (
-                        "Find the HAND-DRAWN box (rectangle or square drawn in pen) "
-                        "in the TOP HEADER area of this auction intake sheet. "
-                        "Inside the box is a 2-5 digit number (e.g. 2860, 6009, 559).\n\n"
-                        "Ignore any printed boxes, printed labels, or the LISTER box "
-                        "at the bottom. Ignore item/lot numbers in the grid. Look ONLY "
-                        "for a hand-drawn box in the top portion of the page.\n\n"
-                        "Reply with ONLY the digits inside that box. If you cannot find "
+                        "This is a J&J Estate Auctioneers intake sheet. "
+                        "At the TOP of the sheet, above or beside the \"SELLERS NAME\" line, "
+                        "the office worker draws a rectangle or square in black pen/marker "
+                        "around the seller's number. The number is 1-5 digits (examples: "
+                        "6, 06, 559, 1894, 2860, 6009).\n\n"
+                        "The box is ALWAYS hand-drawn (not a printed rectangle) and is in "
+                        "the top portion of the sheet, near the sellers name / cart # line.\n\n"
+                        "Read the digits inside that hand-drawn box.\n\n"
+                        "Rules:\n"
+                        "- Ignore any printed boxes such as OFFICE USE ONLY, LOT DESCRIPTION, "
+                        "or the LISTER box at the bottom.\n"
+                        "- Ignore lot/item numbers in the grid rows.\n"
+                        "- Ignore CART # if it's just letters like \"Test\".\n"
+                        "- Preserve leading zeros exactly as written (06 stays 06, not 6).\n\n"
+                        "Reply with ONLY the digits, nothing else. If you truly cannot see "
                         "a hand-drawn box with a number, reply with exactly: NONE"
                     )},
                     {"type": "image_url", "image_url": {
@@ -973,12 +987,13 @@ async def extract_seller_number(image_bytes: bytes, media_type: str) -> str:
             }],
         )
         raw = (resp.choices[0].message.content or "").strip()
-        # Keep only digits.
-        digits = re.sub(r"[^0-9]", "", raw)
-        # Sanity: reject if too short/long or if AI said NONE.
+        print(f"extract_seller_number raw response: {raw!r}", flush=True)
+        # Sanity: reject if AI said NONE.
         if "NONE" in raw.upper():
             return ""
-        if 2 <= len(digits) <= 5:
+        # Keep only digits, but preserve them in original order (leading zeros OK).
+        digits = re.sub(r"[^0-9]", "", raw)
+        if 1 <= len(digits) <= 5:
             return digits
         return ""
     except Exception as e:
