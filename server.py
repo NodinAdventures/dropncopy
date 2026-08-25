@@ -538,30 +538,44 @@ def compute_divider_score(image_bytes: bytes) -> float:
             gray = img.convert("L")
             gray.thumbnail((256, 256))
             w, h = gray.size
-            # v25.35: crop the JnJ watermark from the correct edge based on
-            # orientation. In landscape photos the 'JNJ ONLINE AUCTION -
-            # FREMONT' watermark sits at the BOTTOM of the frame. In portrait
-            # photos it sits along the RIGHT edge (or bottom if the photo was
-            # rotated). Cropping the wrong edge leaves the watermark inside
-            # our measurement area, which pulls up mean/stddev/edges and
-            # tanks the divider score for portrait dividers.
-            #
-            # Strategy: crop 20% off BOTH the bottom AND the right, so we
-            # remove the watermark regardless of orientation. This costs us
-            # a bit of legitimate content area for correctly-oriented photos
-            # but is safer than guessing wrong.
-            content_area = gray.crop((0, 0, int(w * 0.80), int(h * 0.80)))
+            gray_full = gray.copy()
             gray.close()
 
-            stat = ImageStat.Stat(content_area)
-            mean = stat.mean[0]
-            stddev = stat.stddev[0]
+            # v25.36: the JnJ watermark's position depends on the photo's
+            # original orientation — landscape puts it at the bottom, portrait
+            # puts it in the middle (Ashley's IMG_2925 shows FILE 13 178
+            # with the watermark reading straight across the middle of the
+            # portrait frame, NOT along any edge). Cropping edges doesn't
+            # reliably remove it.
+            #
+            # Better approach: divide the photo into 4 quadrants and score
+            # each. A TRUE divider has AT LEAST ONE quadrant that's almost
+            # perfectly black — the corner the watermark doesn't touch. A
+            # real item photo has content in every quadrant. Pick the
+            # DARKEST/FLATTEST quadrant as our measurement.
+            def quad_metrics(box):
+                q = gray_full.crop(box)
+                st = ImageStat.Stat(q)
+                m, sd = st.mean[0], st.stddev[0]
+                eg = q.filter(ImageFilter.FIND_EDGES)
+                em = ImageStat.Stat(eg).mean[0]
+                eg.close()
+                q.close()
+                return (m, sd, em)
 
-            edges = content_area.filter(ImageFilter.FIND_EDGES)
-            edge_stat = ImageStat.Stat(edges)
-            edge_mean = edge_stat.mean[0]
-            edges.close()
-            content_area.close()
+            quads = [
+                (0, 0, w // 2, h // 2),           # top-left
+                (w // 2, 0, w, h // 2),           # top-right
+                (0, h // 2, w // 2, h),           # bottom-left
+                (w // 2, h // 2, w, h),           # bottom-right
+            ]
+            metrics = [quad_metrics(b) for b in quads]
+            # Pick the quadrant with the LOWEST mean (darkest) — that's the
+            # part of the frame the watermark isn't in. For a real divider,
+            # this quadrant is essentially perfect black.
+            best = min(metrics, key=lambda m: m[0])
+            mean, stddev, edge_mean = best
+            gray_full.close()
 
         # v25.34: SHARPER scoring — award divider points only to photos that
         # are UNAMBIGUOUSLY divider-like. v25.31 was too generous, giving
@@ -594,7 +608,7 @@ def compute_divider_score(image_bytes: bytes) -> float:
         score = darkness + flatness + blankness
 
         try:
-            print(f"divider-score-v34: mean={mean:.1f} stddev={stddev:.1f} edge_mean={edge_mean:.2f} → score={score:.0f}", flush=True)
+            print(f"divider-score-v36: darkest_quad mean={mean:.1f} stddev={stddev:.1f} edge_mean={edge_mean:.2f} → score={score:.0f}", flush=True)
         except Exception:
             pass
 
