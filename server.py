@@ -1472,11 +1472,11 @@ async def jnj_match_photos(
                             "role": "user",
                             "content": [
                                 {"type": "text", "text": (
-                                    "Classify this auction-sale photo. Reply with EXACTLY one word:\n\n"
-                                    "YES   - clearly contains an auction item (furniture, tool, collectible, appliance, vehicle, box of goods, etc.).\n"
-                                    "NO    - clearly contains NO item: a hand/finger over lens, a floor/carpet/wall/ceiling/sky with nothing else, an all-black or all-white frame, or a completely blurry shot.\n"
-                                    "MAYBE - ambiguous close-up of a texture, surface, part, or detail (metal, wood grain, fabric, wheel, drawer, hardware) that COULD be part of an item nearby but isn't identifiable on its own.\n\n"
-                                    "Answer only: YES, NO, or MAYBE."
+                                    "This is a photo from an estate auction. It almost certainly shows a physical object being sold: furniture, tool, lamp, appliance, decor, box, art, vehicle, collectible, or any household good.\n\n"
+                                    "Reply with EXACTLY one word:\n\n"
+                                    "NO    - ONLY if the frame is essentially empty: an all-black frame (lens covered), an all-white frame, a hand or finger fully covering the lens with nothing else visible, or a totally blurry featureless frame. If you can identify ANY object at all (even part of one), do NOT answer NO.\n"
+                                    "YES   - any photo where you can see an object, item, piece of furniture, lamp, tool, decor, appliance, or anything being sold. This is the default.\n\n"
+                                    "Bias strongly toward YES. When in doubt, answer YES. Only answer NO for a truly empty/black/white/covered frame."
                                 )},
                                 {"type": "image_url", "image_url": {
                                     "url": f"data:image/jpeg;base64,{ai_thumb_b64}",
@@ -1488,9 +1488,11 @@ async def jnj_match_photos(
                         temperature=0,
                     )
                     answer = (resp.choices[0].message.content or "").strip().lower()
-                    if answer.startswith("m"):
-                        first_pass = "maybe"
-                    elif answer.startswith("n"):
+                    # v25.7: drop MAYBE — treat any non-"no" as YES. We only want
+                    # the AI to flag TRUE empty frames as blank; the deterministic
+                    # is_divider_photo check above already catches the real black
+                    # dividers. If the AI is unsure, we default to YES (real item).
+                    if answer.startswith("n"):
                         first_pass = "no"
                 except Exception as e:
                     print(f"has-item check failed for {filename}: {type(e).__name__}: {e}", flush=True)
