@@ -1035,6 +1035,28 @@ body {
   margin-right: 6px;
   color: var(--text-dim);
 }
+/* v25.8: inline-editable pills so Ashley can tap-fix OCR misreads. */
+.jnj-item-desc .lot-code-editable {
+  cursor: text;
+  outline: 1px dashed transparent;
+  transition: outline-color .12s ease, background .12s ease;
+}
+.jnj-item-desc .lot-code-editable:hover {
+  outline-color: #94a3b8;
+}
+.jnj-item-desc .lot-code-editable:focus {
+  outline: 2px solid #2563eb;
+  background: #fff;
+  color: #111;
+}
+.jnj-item-num [contenteditable='true']:focus,
+.jnj-item-desc [contenteditable='true']:focus {
+  outline: 2px solid #2563eb;
+  background: #fff;
+  color: #111;
+  border-radius: 3px;
+  padding: 0 2px;
+}
 .jnj-item-photos {
   display: flex;
   gap: 4px;

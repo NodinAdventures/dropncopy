@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-25-item-biased-prompt-v25.7";
+const BUILD_ID = "2026-08-25-inline-editable-lots-v25.8";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v25.7 boot. BUILD_ID:", "2026-08-25-item-biased-prompt-v25.7");
+jnjLog("BOOT", "v25.8 boot. BUILD_ID:", "2026-08-25-inline-editable-lots-v25.8");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -1054,7 +1054,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v25.7 · ${BUILD_ID}`;
+  badge.textContent = `v25.8 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
@@ -1632,7 +1632,11 @@ function jnjRenderPreview() {
     card.className = "jnj-item-card";
     card.dataset.itemNum = it.item_num;
 
-    const lotHtml = it.lot_code ? `<span class="lot-code">${escapeHtml(it.lot_code)}</span>` : "";
+    // v25.8: lot codes and item numbers are INLINE-EDITABLE. Tap the pill
+    // to correct any OCR misread (e.g. "116C" → "4B"). Fixes ride along
+    // through to the CSV / ZIP export automatically because we mutate
+    // jnjState.items[i] on blur.
+    const lotHtml = `<span class="lot-code lot-code-editable" contenteditable="true" spellcheck="false" data-field="lot_code" title="Tap to fix lot code">${escapeHtml(it.lot_code || "—")}</span>`;
     const photos = jnjState.itemPhotos[it.item_num] || [];
     const photosHtml = photos.length
       ? photos.map(fname => jnjPhotoThumbHtml(fname)).join("")
@@ -1648,8 +1652,8 @@ function jnjRenderPreview() {
     }
 
     card.innerHTML = `
-      <div class="jnj-item-num">${escapeHtml(it.item_num)}<small>#${jnjState.items.indexOf(it) + 1}</small></div>
-      <div class="jnj-item-desc">${lotHtml}${escapeHtml(it.description)}</div>
+      <div class="jnj-item-num"><span contenteditable="true" spellcheck="false" data-field="item_num" title="Tap to fix item #" style="cursor:text;">${escapeHtml(it.item_num)}</span><small>#${jnjState.items.indexOf(it) + 1}</small></div>
+      <div class="jnj-item-desc">${lotHtml} <span contenteditable="true" spellcheck="false" data-field="description" title="Tap to fix description" style="cursor:text;">${escapeHtml(it.description)}</span></div>
       <div class="jnj-item-actions">
         ${badgeHtml}
         <div class="jnj-item-photos">${photosHtml}</div>
@@ -1657,6 +1661,29 @@ function jnjRenderPreview() {
       </div>
     `;
     jnjItemsList.appendChild(card);
+
+    // Wire up inline editors — on blur, write back to jnjState.items so
+    // downstream CSV/ZIP export uses the corrected values.
+    const currentItem = it;
+    card.querySelectorAll("[contenteditable='true']").forEach(el => {
+      el.addEventListener("blur", () => {
+        const field = el.dataset.field;
+        let val = (el.textContent || "").trim();
+        if (field === "lot_code" && (val === "\u2014" || val === "-")) val = "";
+        // Uppercase item_num / lot_code to match sanitizer downstream
+        if (field === "item_num" || field === "lot_code") val = val.toUpperCase().replace(/\s+/g, "");
+        if (currentItem[field] !== val) {
+          jnjLog("USER-EDIT", `item#${jnjState.items.indexOf(currentItem)+1} ${field}: "${currentItem[field]}" → "${val}"`);
+          currentItem[field] = val;
+          // Re-render text but don't nuke the DOM (keeps focus friendly)
+          if (field === "lot_code") el.textContent = val || "\u2014";
+        }
+      });
+      // Enter commits (blurs)
+      el.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); el.blur(); }
+      });
+    });
 
     // Drag targets
     card.addEventListener("dragover", (e) => {
