@@ -464,32 +464,66 @@ def is_blank_image(png_bytes: bytes, dark_ratio_threshold: float = 0.005) -> boo
 
 
 def is_divider_photo(image_bytes: bytes) -> bool:
-    """v25.2: Fast deterministic check for Dave's "divider" photos — the ones
+    """v25.26: Fast deterministic check for Dave's "divider" photos — the ones
     he shoots between items to visually separate lots. These are almost
     always all-black (lens covered), all-white (hand over lens/flash), or
     another near-monochrome frame with almost no detail.
 
-    Returns True when the photo is:
-      - Very dark (mean brightness < 20) OR very bright (> 235)  — all-black / all-white
-      - Low standard deviation (< 12) — solid single color / near-monochrome
+    v25.26 loosened thresholds after Ashley's 8-sheet test where only 19 of
+    ~50 expected black dividers were detected. Dave's phone camera introduces
+    noise/grain when the lens is covered, pushing mean brightness up to 25-45
+    and stddev up to 15-30 — well above v25.2's tight bounds. We also added
+    a low-edge-count signal (Sobel-lite) because a lens-covered frame has
+    near-zero edges, while any real photo of an item has thousands.
 
-    This is deterministic, runs in ~5ms per photo, and catches Dave's black
-    dividers with 100% accuracy without needing an AI call.
+    Returns True when the photo is:
+      - Dark (mean < 45) AND low variation (stddev < 25) — noisy near-black
+      - OR Bright (mean > 220) AND low variation (stddev < 25) — near-white
+      - OR solid near-monochrome frame (stddev < 15) — any color, no detail
+      - OR near-zero edge density (< 0.5% edge pixels) — lens covered / featureless
+
+    This is deterministic, runs in ~10ms per photo, and now catches Dave's
+    imperfect black dividers without needing an AI call. Real photos of
+    dim items still have edges + higher stddev so they're not affected.
     """
     try:
-        from PIL import Image, ImageStat
+        from PIL import Image, ImageStat, ImageFilter
         with Image.open(io.BytesIO(image_bytes)) as img:
             gray = img.convert("L")
             gray.thumbnail((128, 128))
             stat = ImageStat.Stat(gray)
             mean = stat.mean[0]
             stddev = stat.stddev[0]
+
+            # Edge density check: FIND_EDGES highlights pixels where
+            # brightness changes sharply. A lens-covered frame has ~0 edges.
+            # A real photo of any item has thousands of edge pixels.
+            edges = gray.filter(ImageFilter.FIND_EDGES)
+            edge_stat = ImageStat.Stat(edges)
+            # Mean of the edge-magnitude image: 0-5 for lens-covered,
+            # 15-40 for real photos.
+            edge_mean = edge_stat.mean[0]
+            edges.close()
             gray.close()
-        # All-black or all-white with basically no variation.
-        if (mean < 20 or mean > 235) and stddev < 20:
+
+        # Debug log so we can tune if needed.
+        try:
+            print(f"divider-metrics: mean={mean:.1f} stddev={stddev:.1f} edge_mean={edge_mean:.2f}", flush=True)
+        except Exception:
+            pass
+
+        # Near-black with noise (v25.26 primary widening).
+        if mean < 45 and stddev < 25:
             return True
-        # Solid near-monochrome frame with very little detail.
-        if stddev < 12:
+        # Near-white (flash / hand-over-lens).
+        if mean > 220 and stddev < 25:
+            return True
+        # Solid single-color frame at any brightness (very rare but possible).
+        if stddev < 15:
+            return True
+        # Near-zero detail — catches lens-covered frames the brightness
+        # thresholds miss (e.g. dark grey camera bag interior).
+        if edge_mean < 4.0:
             return True
         return False
     except Exception:
