@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-25-stricter-closeup-v25.3";
+const BUILD_ID = "2026-08-25-seller-groups-v25.4";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v25.3 boot. BUILD_ID:", "2026-08-25-stricter-closeup-v25.3");
+jnjLog("BOOT", "v25.4 boot. BUILD_ID:", "2026-08-25-seller-groups-v25.4");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -1054,7 +1054,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v25.3 · ${BUILD_ID}`;
+  badge.textContent = `v25.4 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
@@ -1210,14 +1210,47 @@ async function jnjHandleFiles(input) {
       sheetFd.append("sheet", sheetFile);
       const sd = await postForJson(JNJ_BUILD_SHEET_URL, sheetFd, `Sheet ${sIdx + 1}/${sheets.length}`);
       const sellerNum = (sd.seller_number || "").trim();
-      jnjLog("SHEET-RESULT", `sheet=${sIdx + 1}/${sheets.length}`, `filename=${sheetFile.name}`, `seller_number=${JSON.stringify(sd.seller_number)}`, `items=${(sd.items || []).length}`);
-      // Tag each item from this sheet with its own boxed seller #.
-      const itemsFromSheet = (sd.items || []).map(it => ({
-        ...it,
-        sheet_seller_num: sellerNum,
-        sheet_index: sIdx,
-      }));
-      return { items: itemsFromSheet, seller_number: sellerNum, filename: sheetFile.name };
+      // v25.4: seller_groups is an ordered list of hand-drawn boxes on the
+      // sheet. Each group covers items from its first_item_num DOWN to (but
+      // not including) the next group. Fall back to a single-group model
+      // using seller_number if the server didn't return groups.
+      let sellerGroups = Array.isArray(sd.seller_groups) ? sd.seller_groups.slice() : [];
+      if (!sellerGroups.length && sellerNum) {
+        sellerGroups = [{ seller_num: sellerNum, first_item_num: "" }];
+      }
+      jnjLog("SHEET-RESULT", `sheet=${sIdx + 1}/${sheets.length}`, `filename=${sheetFile.name}`, `seller_number=${JSON.stringify(sd.seller_number)}`, `groups=${JSON.stringify(sellerGroups)}`, `items=${(sd.items || []).length}`);
+
+      // Stamp each item from this sheet with the correct seller # by
+      // walking the item list top-to-bottom and switching to the next
+      // group whenever we cross that group's first_item_num.
+      const rawItems = sd.items || [];
+      const normItem = (v) => String(v || "").replace(/[^A-Za-z0-9]/g, "").toLowerCase();
+      let groupIdx = -1; // -1 = before any group; use "" seller until we hit one
+      let nextChangeAt = sellerGroups.length ? normItem(sellerGroups[0].first_item_num) : "";
+      const itemsFromSheet = rawItems.map(it => {
+        const itemNum = normItem(it.item_num || it.LotNumber || it.lot_number || "");
+        // Advance groupIdx if the current item matches (or has passed) the next group's start.
+        while (groupIdx + 1 < sellerGroups.length) {
+          const boundary = normItem(sellerGroups[groupIdx + 1].first_item_num);
+          if (!boundary) break; // no known boundary — stay in current group
+          if (itemNum === boundary || (groupIdx === -1)) {
+            // First item OR exact-match boundary: advance.
+            groupIdx += 1;
+            nextChangeAt = groupIdx + 1 < sellerGroups.length ? normItem(sellerGroups[groupIdx + 1].first_item_num) : "";
+            if (itemNum !== boundary) break;
+          } else {
+            break;
+          }
+        }
+        const activeSeller = groupIdx >= 0 ? sellerGroups[groupIdx].seller_num : (sellerNum || "");
+        return {
+          ...it,
+          sheet_seller_num: activeSeller,
+          sheet_index: sIdx,
+        };
+      });
+      jnjLog("SHEET-STAMP", `sheet=${sIdx + 1}`, `groups=${sellerGroups.length}`, `stamped=${itemsFromSheet.map(i => `${(i.item_num||"").toString().slice(0,6)}=${i.sheet_seller_num}`).join(",")}`);
+      return { items: itemsFromSheet, seller_number: sellerNum, seller_groups: sellerGroups, filename: sheetFile.name };
     }));
 
     // Flatten items across all sheets, preserving order (sheet 1's items first, etc.).
@@ -1225,21 +1258,23 @@ async function jnjHandleFiles(input) {
     const sellerNums = [];
     for (const r of sheetResults) {
       items.push(...r.items);
-      if (r.seller_number) sellerNums.push(r.seller_number);
+      for (const g of (r.seller_groups || [])) {
+        if (g.seller_num) sellerNums.push(g.seller_num);
+      }
     }
     if (!items.length) throw new Error("Sheets transcribed but no item rows were parsed.");
 
-    // Auto-fill Seller ID with the FIRST detected number (as a display convenience).
-    // The actual CSV uses each item's own sheet_seller_num, so this field is only
-    // used as a fallback for items whose sheet didn't produce a boxed number.
+    // Auto-fill Seller ID with the FIRST detected number (display fallback
+    // for items whose sheet produced no boxed # at all). Each item's own
+    // sheet_seller_num is what actually goes on its CSV row.
     if (sellerNums.length > 0) {
       jnjSellerId.value = sellerNums[0];
       jnjSavePrefs();
-      if (sellerNums.length === 1) {
-        toast(`Detected seller # ${sellerNums[0]} on the sheet.`);
+      const uniq = [...new Set(sellerNums)];
+      if (uniq.length === 1) {
+        toast(`Detected seller # ${uniq[0]} across your sheet${sheets.length > 1 ? "s" : ""}.`);
       } else {
-        const uniq = [...new Set(sellerNums)];
-        toast(`Detected ${uniq.length} seller #${uniq.length > 1 ? "s" : ""} across ${sheets.length} sheets: ${uniq.join(", ")}`);
+        toast(`Detected ${uniq.length} seller #s: ${uniq.join(", ")}`);
       }
     }
 

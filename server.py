@@ -967,6 +967,87 @@ async def transcribe_uploaded_sheet(sheet: UploadFile) -> str:
         return text
 
 
+async def extract_seller_groups(image_bytes: bytes, media_type: str) -> List[Dict[str, str]]:
+    """v25.4: Find EVERY hand-drawn box on the sheet, not just the top one.
+
+    On JnJ sheets a boxed number covers items from where it appears down
+    until the next boxed number. So a single sheet may have multiple boxed
+    sellers, each grouping a range of item rows.
+
+    Returns a list ordered top-to-bottom:
+      [
+        {"seller_num": "1894", "first_item_num": "2000"},   # first group
+        {"seller_num": "06",   "first_item_num": "2004"},   # next group down
+      ]
+
+    Where 'first_item_num' is the item number from the OFFICE USE ONLY
+    column of the FIRST item row that falls under that box. The client uses
+    this to stamp each item with the correct seller #.
+
+    Empty list if no boxed numbers found.
+    """
+    if not _OPENAI_KEY:
+        return []
+    try:
+        b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
+        resp = await client.chat.completions.create(
+            model="gpt-4o",
+            max_tokens=200,
+            temperature=0,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": (
+                        "This is a J&J Estate Auctioneers intake sheet with a grid of "
+                        "item rows. The office worker draws HAND-DRAWN BOXES around "
+                        "seller numbers on this sheet in black pen/marker.\n\n"
+                        "IMPORTANT: There may be MULTIPLE hand-drawn boxes on one sheet. "
+                        "Each box applies to items from that box's row DOWN until the "
+                        "next hand-drawn box. Sometimes there is only one box at the very "
+                        "top; sometimes there are additional boxes further down the sheet.\n\n"
+                        "Find EVERY hand-drawn box (top to bottom) and read:\n"
+                        "1. The digits inside the box (1-5 digits, e.g. 6, 06, 559, 1894, 2860).\n"
+                        "2. The item number in the OFFICE USE ONLY column of the FIRST "
+                        "row of items that appears at or below that box (e.g. 2000, 2001, 7942).\n\n"
+                        "Reply as JSON only, no prose:\n"
+                        "{\"groups\": [ {\"seller_num\": \"1894\", \"first_item_num\": \"2000\"}, "
+                        "{\"seller_num\": \"06\", \"first_item_num\": \"2004\"} ]}\n\n"
+                        "Rules:\n"
+                        "- Ignore PRINTED boxes (OFFICE USE ONLY header, LOT DESCRIPTION header).\n"
+                        "- Ignore the lister/cart sub-boxes at the bottom.\n"
+                        "- Preserve leading zeros (06 stays 06).\n"
+                        "- List groups top-to-bottom in the order they appear on the sheet.\n"
+                        "- If there are no hand-drawn boxes at all, reply: {\"groups\": []}"
+                    )},
+                    {"type": "image_url", "image_url": {
+                        "url": f"data:{media_type};base64,{b64}",
+                        "detail": "high",
+                    }},
+                ],
+            }],
+            response_format={"type": "json_object"},
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        print(f"extract_seller_groups raw: {raw!r}", flush=True)
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            return []
+        groups = parsed.get("groups", []) if isinstance(parsed, dict) else []
+        cleaned = []
+        for g in groups:
+            if not isinstance(g, dict):
+                continue
+            sn = re.sub(r"[^0-9]", "", str(g.get("seller_num", "")))
+            fi = re.sub(r"[^A-Za-z0-9]", "", str(g.get("first_item_num", "")))
+            if 1 <= len(sn) <= 5:
+                cleaned.append({"seller_num": sn, "first_item_num": fi})
+        return cleaned
+    except Exception as e:
+        print(f"extract_seller_groups failed: {type(e).__name__}: {e}", flush=True)
+        return []
+
+
 async def extract_seller_number(image_bytes: bytes, media_type: str) -> str:
     """Find the hand-drawn BOXED seller number in the top header area of a
     JnJ intake sheet. The seller draws a rectangle/square around 2-4 digits
@@ -1242,21 +1323,32 @@ async def jnj_build_sheet(sheet: UploadFile = File(...)):
                 media_type = ctype if ctype.startswith("image/") else "image/jpeg"
                 return await transcribe_image(raw, media_type)
 
-        async def _do_seller_num():
+        async def _do_seller_groups():
+            # v25.4: extract ALL hand-drawn boxes and their approximate
+            # first-item-number, not just one boxed # for the whole sheet.
             if is_pdf:
                 pages = render_pdf_pages(raw, dpi=180)
                 if not pages:
-                    return ""
-                return await extract_seller_number(pages[0], "image/png")
+                    return []
+                return await extract_seller_groups(pages[0], "image/png")
             else:
                 media_type = ctype if ctype.startswith("image/") else "image/jpeg"
-                return await extract_seller_number(raw, media_type)
+                return await extract_seller_groups(raw, media_type)
 
-        transcript, seller_number = await asyncio.gather(_do_transcript(), _do_seller_num())
+        transcript, seller_groups = await asyncio.gather(_do_transcript(), _do_seller_groups())
         items = parse_items_from_transcript(transcript)
         if not items:
             raise HTTPException(400, f"Sheet transcribed but no item rows were parsed. Transcript: {transcript[:400]}")
-        return JSONResponse({"transcript": transcript, "items": items, "seller_number": seller_number or ""})
+        # Back-compat: keep `seller_number` field pointing at the FIRST group's
+        # number — the client still uses it to auto-fill the Seller ID field
+        # near the sale name. seller_groups is the new authoritative list.
+        first_seller = seller_groups[0]["seller_num"] if seller_groups else ""
+        return JSONResponse({
+            "transcript": transcript,
+            "items": items,
+            "seller_number": first_seller,
+            "seller_groups": seller_groups,
+        })
     except HTTPException:
         raise
     except Exception as e:
