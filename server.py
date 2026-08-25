@@ -1300,6 +1300,12 @@ async def jnj_build_sheet(sheet: UploadFile = File(...)):
     v20: ALSO extracts the hand-drawn boxed seller number from the top of
     the sheet and returns it as `seller_number` — the client uses this to
     fill in the Seller ID field automatically.
+
+    v25.13: When a multi-page PDF is uploaded, treat each non-blank page as
+    its own sheet with its own boxed seller # extraction. Response now always
+    includes a `pages` array (one entry per page) so the frontend can flatten
+    a single multi-page PDF into N virtual sheets. For a single-image upload
+    or a single-page PDF, `pages` has exactly one entry.
     """
     try:
         # Read the sheet ONCE, then do transcription + seller-number extraction
@@ -1311,43 +1317,66 @@ async def jnj_build_sheet(sheet: UploadFile = File(...)):
         ctype = (sheet.content_type or "").lower()
         is_pdf = fname.endswith(".pdf") or ctype == "application/pdf"
 
-        async def _do_transcript():
-            if is_pdf:
-                pages = render_pdf_pages(raw, dpi=180)
-                non_blank = [pb for pb in pages if not is_blank_image(pb)]
-                if not non_blank:
-                    return ""
-                texts = await asyncio.gather(*[transcribe_image(pb, "image/png") for pb in non_blank])
-                return "\n".join(texts)
-            else:
-                media_type = ctype if ctype.startswith("image/") else "image/jpeg"
-                return await transcribe_image(raw, media_type)
+        # --- v25.13: build a list of (page_bytes, media_type) tuples ---
+        # For an image upload, the list has one entry (the image itself).
+        # For a PDF, the list has one entry per non-blank rendered page.
+        page_units: List[tuple] = []
+        if is_pdf:
+            rendered = render_pdf_pages(raw, dpi=180)
+            non_blank = [pb for pb in rendered if not is_blank_image(pb)]
+            for pb in non_blank:
+                page_units.append((pb, "image/png"))
+        else:
+            media_type = ctype if ctype.startswith("image/") else "image/jpeg"
+            page_units.append((raw, media_type))
 
-        async def _do_seller_groups():
-            # v25.4: extract ALL hand-drawn boxes and their approximate
-            # first-item-number, not just one boxed # for the whole sheet.
-            if is_pdf:
-                pages = render_pdf_pages(raw, dpi=180)
-                if not pages:
-                    return []
-                return await extract_seller_groups(pages[0], "image/png")
-            else:
-                media_type = ctype if ctype.startswith("image/") else "image/jpeg"
-                return await extract_seller_groups(raw, media_type)
+        if not page_units:
+            raise HTTPException(400, "Sheet appears blank — no readable pages found.")
 
-        transcript, seller_groups = await asyncio.gather(_do_transcript(), _do_seller_groups())
-        items = parse_items_from_transcript(transcript)
-        if not items:
-            raise HTTPException(400, f"Sheet transcribed but no item rows were parsed. Transcript: {transcript[:400]}")
-        # Back-compat: keep `seller_number` field pointing at the FIRST group's
-        # number — the client still uses it to auto-fill the Seller ID field
-        # near the sale name. seller_groups is the new authoritative list.
-        first_seller = seller_groups[0]["seller_num"] if seller_groups else ""
+        # --- Run transcription + seller-group extraction on EACH page in parallel ---
+        async def _do_page(pb: bytes, mt: str) -> Dict[str, Any]:
+            transcript_task = transcribe_image(pb, mt)
+            groups_task = extract_seller_groups(pb, mt)
+            transcript, seller_groups = await asyncio.gather(transcript_task, groups_task)
+            items = parse_items_from_transcript(transcript)
+            first_seller = seller_groups[0]["seller_num"] if seller_groups else ""
+            return {
+                "transcript": transcript,
+                "items": items,
+                "seller_number": first_seller,
+                "seller_groups": seller_groups,
+            }
+
+        page_results = await asyncio.gather(*[_do_page(pb, mt) for pb, mt in page_units])
+
+        # Drop pages that transcribed to nothing (e.g. blank scan the blank-image
+        # detector missed). If ALL pages came back empty, raise so the client
+        # sees a clear error message with the first page's transcript preview.
+        good_pages = [pg for pg in page_results if pg["items"]]
+        if not good_pages:
+            preview = (page_results[0]["transcript"] or "")[:400]
+            raise HTTPException(400, f"Sheet transcribed but no item rows were parsed. Transcript: {preview}")
+
+        # --- Legacy top-level fields for old clients that don't read `pages` ---
+        # Concatenate all items across pages so pre-v25.13 clients still get a
+        # usable response. New clients (v25.13+) should read `pages` and treat
+        # each entry as its own sheet with its own seller_groups.
+        all_items: List[Dict[str, str]] = []
+        for pg in good_pages:
+            all_items.extend(pg["items"])
+        first_seller = good_pages[0]["seller_number"]
+        first_groups = good_pages[0]["seller_groups"]
+        combined_transcript = "\n".join(pg["transcript"] for pg in good_pages)
+
         return JSONResponse({
-            "transcript": transcript,
-            "items": items,
+            # Legacy fields (kept for back-compat)
+            "transcript": combined_transcript,
+            "items": all_items,
             "seller_number": first_seller,
-            "seller_groups": seller_groups,
+            "seller_groups": first_groups,
+            # v25.13: authoritative per-page breakdown
+            "pages": good_pages,
+            "page_count": len(good_pages),
         })
     except HTTPException:
         raise

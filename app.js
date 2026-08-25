@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-25-remove-top-seller-field-v25.12";
+const BUILD_ID = "2026-08-25-split-multipage-pdf-into-sheets-v25.13";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v25.12 boot. BUILD_ID:", "2026-08-25-remove-top-seller-field-v25.12");
+jnjLog("BOOT", "v25.13 boot. BUILD_ID:", "2026-08-25-split-multipage-pdf-into-sheets-v25.13");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -1054,7 +1054,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v25.12 · ${BUILD_ID}`;
+  badge.textContent = `v25.13 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
@@ -1205,50 +1205,30 @@ async function jnjHandleFiles(input) {
     // Every item is tagged with sheet_seller_num so the CSV builder can put
     // the right ID on each row.
     statusEl.textContent = sheets.length > 1 ? `reading ${sheets.length} sheets…` : "reading sheet…";
-    const sheetResults = await Promise.all(sheets.map(async (sheetFile, sIdx) => {
-      const sheetFd = new FormData();
-      sheetFd.append("sheet", sheetFile);
-      const sd = await postForJson(JNJ_BUILD_SHEET_URL, sheetFd, `Sheet ${sIdx + 1}/${sheets.length}`);
-      const sellerNum = (sd.seller_number || "").trim();
-      // v25.4: seller_groups is an ordered list of hand-drawn boxes on the
-      // sheet. Each group covers items from its first_item_num DOWN to (but
-      // not including) the next group. Fall back to a single-group model
-      // using seller_number if the server didn't return groups.
-      let sellerGroups = Array.isArray(sd.seller_groups) ? sd.seller_groups.slice() : [];
+    // v25.13: helper that turns ONE page of transcription output (with its
+    // own seller_groups) into a stamped list of items. Used both for single-
+    // image uploads and for each PAGE of a multi-page PDF.
+    const stampPage = (pageObj, virtualSheetIdx, filename, totalSheets) => {
+      const sellerNum = (pageObj.seller_number || "").trim();
+      let sellerGroups = Array.isArray(pageObj.seller_groups) ? pageObj.seller_groups.slice() : [];
       if (!sellerGroups.length && sellerNum) {
         sellerGroups = [{ seller_num: sellerNum, first_item_num: "" }];
       }
-      // v25.11: if the first group has no first_item_num boundary, blank it
-      // out (it's just "the top of the sheet"). And ensure the top group is
-      // ALWAYS active from item 0 — don't leave items stamped with the
-      // page-level seller_number when a boxed group exists on the sheet.
       if (sellerGroups.length) {
         sellerGroups[0] = { ...sellerGroups[0], first_item_num: "" };
       }
-      jnjLog("SHEET-RESULT", `sheet=${sIdx + 1}/${sheets.length}`, `filename=${sheetFile.name}`, `seller_number=${JSON.stringify(sd.seller_number)}`, `groups=${JSON.stringify(sellerGroups)}`, `items=${(sd.items || []).length}`);
+      jnjLog("SHEET-RESULT", `sheet=${virtualSheetIdx + 1}/${totalSheets}`, `filename=${filename}`, `seller_number=${JSON.stringify(pageObj.seller_number)}`, `groups=${JSON.stringify(sellerGroups)}`, `items=${(pageObj.items || []).length}`);
 
-      // Stamp each item from this sheet with the correct seller # by
-      // walking the item list top-to-bottom and switching to the next
-      // group whenever we cross that group's first_item_num.
-      const rawItems = sd.items || [];
+      const rawItems = pageObj.items || [];
       const normItem = (v) => String(v || "").replace(/[^A-Za-z0-9]/g, "").toLowerCase();
-      // v25.10: item numbers can be numeric (2000, 2001, 2004) so compare
-      // them numerically when both sides look like integers — that way if
-      // the OCR reads the boundary as 2004 but the actual items in the sheet
-      // start at 2003, we still advance when we hit 2003+ instead of never.
       const asInt = (s) => {
         const m = /^([0-9]+)/.exec(String(s || ""));
         return m ? parseInt(m[1], 10) : NaN;
       };
-      // v25.11: start at group 0 immediately if any groups exist. The top
-      // group covers items from row 0 down until the next group's boundary.
       let groupIdx = sellerGroups.length > 0 ? 0 : -1;
-      const itemsFromSheet = rawItems.map((it, itemIdx) => {
+      const itemsFromSheet = rawItems.map((it) => {
         const itemNum = normItem(it.item_num || it.LotNumber || it.lot_number || "");
         const itemInt = asInt(itemNum);
-        // Advance groupIdx if we've reached the next group's start.
-        // "Reached" means item matches boundary exactly, OR item's numeric
-        // value has met/passed the boundary's numeric value.
         while (groupIdx + 1 < sellerGroups.length) {
           const boundary = normItem(sellerGroups[groupIdx + 1].first_item_num);
           const boundaryInt = asInt(boundary);
@@ -1264,12 +1244,45 @@ async function jnjHandleFiles(input) {
         return {
           ...it,
           sheet_seller_num: activeSeller,
-          sheet_index: sIdx,
+          sheet_index: virtualSheetIdx,
         };
       });
-      jnjLog("SHEET-STAMP", `sheet=${sIdx + 1}`, `groups=${sellerGroups.length}`, `stamped=${itemsFromSheet.map(i => `${(i.item_num||"").toString().slice(0,6)}=${i.sheet_seller_num}`).join(",")}`);
-      return { items: itemsFromSheet, seller_number: sellerNum, seller_groups: sellerGroups, filename: sheetFile.name };
+      jnjLog("SHEET-STAMP", `sheet=${virtualSheetIdx + 1}`, `groups=${sellerGroups.length}`, `stamped=${itemsFromSheet.map(i => `${(i.item_num||"").toString().slice(0,6)}=${i.sheet_seller_num}`).join(",")}`);
+      return { items: itemsFromSheet, seller_number: sellerNum, seller_groups: sellerGroups, filename };
+    };
+
+    // v25.13: first pass — POST each uploaded sheet-file to the backend.
+    // Response may include a `pages` array (multi-page PDF). We do the flatten
+    // in a second pass so numbering stays sequential across files+pages.
+    const rawSheetResponses = await Promise.all(sheets.map(async (sheetFile, sIdx) => {
+      const sheetFd = new FormData();
+      sheetFd.append("sheet", sheetFile);
+      const sd = await postForJson(JNJ_BUILD_SHEET_URL, sheetFd, `Sheet ${sIdx + 1}/${sheets.length}`);
+      return { sd, sheetFile };
     }));
+
+    // Second pass: flatten each file into 1+ virtual sheets and stamp them.
+    // Count total virtual sheets first so the log shows accurate "sheet=N/M".
+    let totalVirtualSheets = 0;
+    for (const { sd } of rawSheetResponses) {
+      if (Array.isArray(sd.pages) && sd.pages.length) {
+        totalVirtualSheets += sd.pages.length;
+      } else {
+        totalVirtualSheets += 1;
+      }
+    }
+    const sheetResults = [];
+    let virtualIdx = 0;
+    for (const { sd, sheetFile } of rawSheetResponses) {
+      const pages = Array.isArray(sd.pages) && sd.pages.length
+        ? sd.pages
+        : [{ items: sd.items || [], seller_number: sd.seller_number || "", seller_groups: sd.seller_groups || [] }];
+      pages.forEach((pageObj, pageIdx) => {
+        const label = pages.length > 1 ? `${sheetFile.name} p${pageIdx + 1}` : sheetFile.name;
+        sheetResults.push(stampPage(pageObj, virtualIdx, label, totalVirtualSheets));
+        virtualIdx += 1;
+      });
+    }
 
     // Flatten items across all sheets, preserving order (sheet 1's items first, etc.).
     const items = [];
