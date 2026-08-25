@@ -131,6 +131,27 @@ Read the handwriting VERY carefully. "Grill" and "Quilt" look similar in cursive
 - Do NOT split quantities into multiple output lines.
 - The seller writes separate rows (each with its own item number) when they want items sold separately. Trust the sheet.
 
+=== DITTO MARKS — SAME AS ABOVE (VERY IMPORTANT) ===
+Sellers frequently use ditto marks (quotation marks) in the description column to mean "same item as the row above." You'll see it as `" " "`, `"  "`, `"  "  "`, ditto symbols, or sometimes just the word "same" or "ditto." The row still has its own item number and lot code (they are NEVER dittoed — always read those fresh) but the DESCRIPTION is inherited.
+
+When you see ditto marks in the description column, output the ditto marks EXACTLY. Do NOT try to guess or copy the previous description — our downstream parser handles the expansion. Just output the item number, lot code, and the literal ditto marks.
+
+Example sheet rows:
+  3025  38C  LED Utility Light - Dusk to Dawn
+  3026  37B  "   "   "                         ← ditto: same item, different lot
+  3033  37B  Hand sanitizer - Great for camping
+  3034  38C  "                                 ← ditto
+  3035  37B  "                                 ← ditto
+
+Output them as:
+  3025 38C LED UTILITY LIGHT DUSK TO DAWN
+  3026 37B " " "
+  3033 37B HAND SANITIZER GREAT FOR CAMPING
+  3034 38C "
+  3035 37B "
+
+NEVER skip a row because it only has ditto marks. NEVER merge a ditto row into the previous row — it's a separate listing with its own item number.
+
 === MULTI-LINE DESCRIPTIONS (VERY IMPORTANT) ===
 Sellers often write long descriptions that WRAP onto a second or third line on the sheet. When a line on the sheet does NOT start with a new item number, it is a CONTINUATION of the previous item's description — NOT a separate item.
 
@@ -774,9 +795,49 @@ def parse_item_lines(transcript: str) -> List[Tuple[str, str, str]]:
                 rest = rest[1:]
         description = " ".join(rest).strip()
         if not description:
-            description = "ILLEGIBLE"
+            # v25.33: empty description often means the OCR saw only ditto
+            # marks and the marks got stripped. Use a literal ditto so the
+            # ditto expander picks it up instead of falling back to
+            # ILLEGIBLE and losing the row's inheritance.
+            description = '"'
         items.append((item_num, lot_code, description))
-    return items
+
+    # v25.33: expand ditto marks. Sellers commonly write `"    "    "` (or
+    # similar) in the description column to mean "same item as the row
+    # above." Ashley: "they can't change this so how do we work with it."
+    #
+    # Detect ditto-style descriptions and copy the previous row's real
+    # description forward. The lot number and location stay unique to this
+    # row — only the description is duplicated. This matches how J&J's
+    # buyers see the listing: same item, different lot #.
+    #
+    # A description counts as ditto if, after removing quotes/apostrophes/
+    # backticks/whitespace/hyphens/asterisks, either nothing is left OR
+    # only the words DITTO / SAME / ABOVE / SAMEASABOVE remain.
+    _DITTO_STRIP = re.compile(r'["\'`‘’“”\s\-*–—.,]+')
+    def _is_ditto(desc: str) -> bool:
+        if not desc:
+            return False
+        stripped = _DITTO_STRIP.sub("", desc).upper()
+        if not stripped:
+            return True  # pure ditto marks / whitespace
+        return stripped in {"DITTO", "SAME", "SAMEASABOVE", "AS", "ABOVE", "SAMEAS"}
+
+    expanded = []
+    last_real_desc = ""
+    for (num, loc, desc) in items:
+        if _is_ditto(desc) and last_real_desc:
+            try:
+                print(f"ditto-expand: {num} {loc} inherits from previous: {last_real_desc!r}", flush=True)
+            except Exception:
+                pass
+            expanded.append((num, loc, last_real_desc))
+        else:
+            expanded.append((num, loc, desc))
+            # Only update the anchor when the current row has a REAL desc.
+            if desc and desc != "ILLEGIBLE" and not _is_ditto(desc):
+                last_real_desc = desc
+    return expanded
 
 
 def build_jnj_csv_row(item_num: str, lot_code: str, description: str,
