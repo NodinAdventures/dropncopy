@@ -1787,15 +1787,27 @@ async def jnj_zip(
         s = (s or "").strip()
         if not s:
             s = datetime.utcnow().strftime("%Y-%m-%d SALE")
-        # Keep letters, digits, spaces, dashes, and the tilde (~) that J&J
-        # uses in sale names like "SEPTEMBER 3 ~ J SALE". Strip other punct.
-        s = re.sub(r"[^A-Za-z0-9 \-~]+", " ", s)
+        # v25.20: J&J's uploader flags "Missing Image" when the sale name
+        # contains a tilde (~). Their working sample uses simple names like
+        # "2026-04-07 TEST" — no punctuation. Strip tilde AND collapse to a
+        # clean alphanumeric+space+dash slug so the folder name inside the
+        # ZIP matches whatever the uploader is looking for.
+        s = re.sub(r"[^A-Za-z0-9 \-]+", " ", s)
         s = re.sub(r"\s+", " ", s).strip()
         return s or "SALE"
 
     sale_folder = _folder_slug(sale_name)
-    # Uppercase prefix inside filenames matches J&J's sample ("TEST 001.webp").
-    photo_prefix = sale_folder.upper()
+    # v25.20: use a SHORT, SAFE filename prefix instead of the whole sale name.
+    # J&J's working sample used "TEST 001.webp" — 4 chars + number. Long prefixes
+    # like "SEPTEMBER 3 ~ J SALE 005.jpg" may hit path-length or character issues
+    # in the uploader. Derive a 3-4 letter code from the first meaningful token.
+    def _short_prefix(folder: str) -> str:
+        toks = [t for t in folder.split() if t and not t.isdigit() and t != "-"]
+        if not toks:
+            return "IMG"
+        first = toks[0].upper()
+        return first[:4] if len(first) >= 3 else first
+    photo_prefix = _short_prefix(sale_folder)
     # ---------------------------------------------------------------------
 
     # Build the zip in memory
