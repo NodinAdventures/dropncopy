@@ -538,8 +538,19 @@ def compute_divider_score(image_bytes: bytes) -> float:
             gray = img.convert("L")
             gray.thumbnail((256, 256))
             w, h = gray.size
-            # Crop bottom 20% (JnJ watermark) so it doesn't skew measurements.
-            content_area = gray.crop((0, 0, w, int(h * 0.80)))
+            # v25.35: crop the JnJ watermark from the correct edge based on
+            # orientation. In landscape photos the 'JNJ ONLINE AUCTION -
+            # FREMONT' watermark sits at the BOTTOM of the frame. In portrait
+            # photos it sits along the RIGHT edge (or bottom if the photo was
+            # rotated). Cropping the wrong edge leaves the watermark inside
+            # our measurement area, which pulls up mean/stddev/edges and
+            # tanks the divider score for portrait dividers.
+            #
+            # Strategy: crop 20% off BOTH the bottom AND the right, so we
+            # remove the watermark regardless of orientation. This costs us
+            # a bit of legitimate content area for correctly-oriented photos
+            # but is safer than guessing wrong.
+            content_area = gray.crop((0, 0, int(w * 0.80), int(h * 0.80)))
             gray.close()
 
             stat = ImageStat.Stat(content_area)
