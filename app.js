@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-25-revert-photo-prompts-v25.5";
+const BUILD_ID = "2026-08-25-cursor-walk-fix-v25.6";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v25.5 boot. BUILD_ID:", "2026-08-25-revert-photo-prompts-v25.5");
+jnjLog("BOOT", "v25.6 boot. BUILD_ID:", "2026-08-25-cursor-walk-fix-v25.6");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -1054,7 +1054,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v25.5 · ${BUILD_ID}`;
+  badge.textContent = `v25.6 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
@@ -1441,13 +1441,29 @@ async function jnjHandleFiles(input) {
     // every time we see is_blank=true, we advance the cursor by 1 item.
     // Blank photos themselves are marked as skipped (not assigned to any item)
     // so they don't clutter the output.
+    // v25.6: two fixes to the cursor walk:
+    //   1. Consecutive blank photos collapse into ONE cursor advance. If Dave
+    //      shoots a burst of 2-3 black frames, we still only move to the next
+    //      item once. Only a blank *following a real item photo* advances.
+    //   2. Only advance the cursor if the current item has already received
+    //      at least one photo. This means a leading blank (before any item
+    //      photos) does NOT skip item 1.
     let cursor = 0;
     let blanksSeen = 0;
+    let currentItemGotPhoto = false;
+    const walkTrace = [];
     for (const p of allPhotoInfos) {
       if (p.is_blank) {
-        // Divider photo — skip it, advance cursor to next item.
         blanksSeen += 1;
-        if (cursor + 1 < items.length) cursor += 1;
+        // Only advance if we have at least one photo on the current item.
+        // Otherwise this blank is a leading/duplicate divider and we ignore it.
+        if (currentItemGotPhoto && cursor + 1 < items.length) {
+          cursor += 1;
+          currentItemGotPhoto = false;
+          walkTrace.push(`${p.filename}=BLANK→item${cursor+1}`);
+        } else {
+          walkTrace.push(`${p.filename}=BLANK-skip`);
+        }
         p.item_num_match = "";
         p.match_kind = "blank"; // special marker; won't be assigned or unmatched
         continue;
@@ -1456,9 +1472,12 @@ async function jnjHandleFiles(input) {
       if (p.match_kind === "none") {
         p.item_num_match = itemNumByIndex[cursor] || "";
         p.match_kind = p.item_num_match ? "order" : "none";
+        currentItemGotPhoto = true;
+        walkTrace.push(`${p.filename}→${p.item_num_match || "?"}`);
       }
     }
     jnjLog("CURSOR-WALK", `photos=${allPhotoInfos.length}`, `blanks_detected=${blanksSeen}`, `final_cursor=${cursor}`, `total_items=${items.length}`);
+    jnjLog("CURSOR-TRACE", walkTrace.join(" | "));
 
     // Wire everything back into local state so the preview UI can render it.
     // v25: was `[sheet, ...photos]` (singular sheet from pre-v23) — v23 renamed to
