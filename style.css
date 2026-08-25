@@ -1035,6 +1035,35 @@ body {
   margin-right: 6px;
   color: var(--text-dim);
 }
+/* v25.9: seller # pill on every row — distinct color from the lot pill so
+   Ashley can see grouping at a glance. Tap to override for any item that
+   got assigned to the wrong seller box. */
+.jnj-item-desc .seller-pill {
+  display: inline-block;
+  padding: 1px 6px;
+  background: rgba(147, 112, 255, 0.15);
+  border: 1px solid rgba(147, 112, 255, 0.35);
+  color: #7c5cff;
+  border-radius: 4px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  margin-right: 6px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.jnj-item-desc .seller-pill-editable {
+  cursor: text;
+  outline: 1px dashed transparent;
+  transition: outline-color .12s ease, background .12s ease;
+}
+.jnj-item-desc .seller-pill-editable:hover {
+  outline-color: #94a3b8;
+}
+.jnj-item-desc .seller-pill-editable:focus {
+  outline: 2px solid #2563eb;
+  background: #fff;
+  color: #111;
+}
 /* v25.8: inline-editable pills so Ashley can tap-fix OCR misreads. */
 .jnj-item-desc .lot-code-editable {
   cursor: text;
