@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-25-per-sheet-divider-pick-v25.39";
+const BUILD_ID = "2026-08-25-ai-verdict-bonus-v25.40";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v25.39 boot. BUILD_ID:", "2026-08-25-per-sheet-divider-pick-v25.39");
+jnjLog("BOOT", "v25.40 boot. BUILD_ID:", "2026-08-25-ai-verdict-bonus-v25.40");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -1085,7 +1085,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v25.39 · ${BUILD_ID}`;
+  badge.textContent = `v25.40 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
@@ -1568,10 +1568,18 @@ async function jnjHandleFiles(input) {
     // around 300) get picked when the sheet needs them.
     const MIN_DIVIDER_SCORE = 200;
     const scoreByIdx = new Map();
+    // v25.40: give AI-confirmed dividers a massive bonus. Previously,
+    // when a photo scored moderate (say 300) on pixel-only but the AI
+    // called it a divider (is_blank=true), we used the raw 300 and let
+    // it lose to darker photos. That's the FILE 13 156 problem — faint
+    // watermark, less-than-perfect black, pixel score around 300, but
+    // the AI knew it was a divider. Add +900 bonus if AI said blank so
+    // it definitely gets picked.
     for (let i = 0; i < allPhotoInfos.length; i++) {
       const p = allPhotoInfos[i];
-      const s = (typeof p.divider_score === "number" ? p.divider_score : (p.is_blank ? 700 : 0));
-      scoreByIdx.set(i, s);
+      const raw = typeof p.divider_score === "number" ? p.divider_score : 0;
+      const aiBonus = p.is_blank ? 900 : 0;
+      scoreByIdx.set(i, raw + aiBonus);
     }
 
     // Pair each folder to a sheet by ORDER. If counts don't align (e.g.
