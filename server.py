@@ -1760,6 +1760,15 @@ async def jnj_match_photos(
                 "dhash": "",
                 "is_blank": is_blank,
                 "first_pass": first_pass,  # 'yes' / 'no' / 'maybe'
+                # v25.43: the client's cursor-walk expects match_kind to be
+                # 'none' for unassigned photos so it can fill them in with
+                # the current cursor's item number. Without this the check
+                # `if (p.match_kind === 'none')` was false (undefined != 'none')
+                # and photos never got assigned to items in order — which is
+                # exactly what caused FILE 13 156 and its neighbors to end up
+                # in item 3022 instead of the correct items.
+                "item_num_match": "",
+                "match_kind": "none",
                 # v25.31: raw divider-ness score (0-1000). Client sorts all
                 # photos by this and picks the top (item_count - 1) as dividers.
                 "divider_score": divider_score,
