@@ -1758,25 +1758,30 @@ async def jnj_zip(
             continue
         photos_by_item.setdefault(target, []).append(p)
 
-    # --- v25.16a: bare filenames + photos at ZIP root ------------------------
-    # v25.14/25.15 mirrored J&J's own sample layout (Pictures/<sale>/ +
-    # backslash paths). Their importer accepted the ZIP and created listings
-    # (14 rows -> 14 Item #s in the Sep 27 test), but the photos didn't
-    # attach. J&J's Admin-CSV-Help spec for columns AD-AW literally says:
-    #   "filename of an image included in the uploaded zip file"
-    # So this build writes just the bare filename in the image_N cells and
-    # drops the photos flat at the ZIP root. Sequential naming per sale is
-    # kept so filenames don't collide.
+    # --- v25.16b: restore J&J's proven subfolder+backslash layout -----------
+    # 25.16a tried bare filenames flat at ZIP root: photos still didn't attach
+    # and items showed "NO PHOTO UPLOADED" on J&J's site (IMG_2899).
+    #
+    # J&J's own working sample (1-2.csv) uses:
+    #   image_1 = ..\Pictures\2026-04-07 TEST\TEST 001.webp
+    # and photos live inside Pictures/2026-04-07 TEST/ in the ZIP.
+    #
+    # This build restores that exact layout. The sale folder name preserves
+    # the ENTIRE sale name Ashley typed (including "~", spaces, and any
+    # tilde/punctuation) so the ZIP subfolder name matches the sale category
+    # J&J's system knows (e.g. "SEPTEMBER 3 ~ J SALE").
     def _folder_slug(s: str) -> str:
         s = (s or "").strip()
         if not s:
             s = datetime.utcnow().strftime("%Y-%m-%d SALE")
-        s = re.sub(r"[^A-Za-z0-9 \-]+", " ", s)
+        # Keep letters, digits, spaces, dashes, and the tilde (~) that J&J
+        # uses in sale names like "SEPTEMBER 3 ~ J SALE". Strip other punct.
+        s = re.sub(r"[^A-Za-z0-9 \-~]+", " ", s)
         s = re.sub(r"\s+", " ", s).strip()
         return s or "SALE"
 
     sale_folder = _folder_slug(sale_name)
-    # Uppercase prefix inside filenames keeps them tied to the sale.
+    # Uppercase prefix inside filenames matches J&J's sample ("TEST 001.webp").
     photo_prefix = sale_folder.upper()
     # ---------------------------------------------------------------------
 
@@ -1814,9 +1819,10 @@ async def jnj_zip(
             # J&J-style sequential name: "<PREFIX> NNN.<ext>", zero-padded to 3.
             sale_photo_seq += 1
             leaf_name = f"{photo_prefix} {sale_photo_seq:03d}.{ext}"
-            # v25.16a: photos flat at ZIP root, image_N cell = bare filename.
-            zip_path = leaf_name
-            csv_ref = leaf_name
+            # v25.16b: photos inside Pictures/<sale>/ subfolder, CSV cell uses
+            # J&J-style Windows backslash path "..\Pictures\<sale>\<file>".
+            zip_path = f"Pictures/{sale_folder}/{leaf_name}"
+            csv_ref = f"..\\Pictures\\{sale_folder}\\{leaf_name}"
             data = await p.read()
             # Reset the file position so we don't consume it if it's used again
             await p.seek(0)
