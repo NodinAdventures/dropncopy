@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-25-sliding-window-darkest-patch-v25.37";
+const BUILD_ID = "2026-08-25-neighbor-rescue-v25.38";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v25.37 boot. BUILD_ID:", "2026-08-25-sliding-window-darkest-patch-v25.37");
+jnjLog("BOOT", "v25.38 boot. BUILD_ID:", "2026-08-25-neighbor-rescue-v25.38");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -1085,7 +1085,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v25.37 · ${BUILD_ID}`;
+  badge.textContent = `v25.38 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
@@ -1527,6 +1527,54 @@ async function jnjHandleFiles(input) {
       if (sp.score < MIN_DIVIDER_SCORE) break;
       dividerSet.add(sp.idx);
     }
+
+    // v25.38: NEIGHBOR RESCUE.
+    // If we picked fewer dividers than expected (item_count - 1), some
+    // true divider photo scored below MIN_DIVIDER_SCORE — the pixel-only
+    // signal wasn't enough for that one photo. Ashley's ask: look at
+    // neighboring photos to decide if a borderline photo is really a
+    // divider.
+    //
+    // A true divider sits BETWEEN two real content photos. So any
+    // borderline photo (score 100-400, the grey zone) whose immediate
+    // neighbors on both sides scored LOW (< 150 = clearly content) is
+    // very likely a divider we missed. We rescue those in score order
+    // until we hit the expected count.
+    if (dividerSet.size < expectedDividers) {
+      const scoreByIdx = new Map(scoredPhotos.map(s => [s.idx, s.score]));
+      const rescueCandidates = [];
+      for (const sp of scoredPhotos) {
+        if (dividerSet.has(sp.idx)) continue;
+        if (sp.score < 100) continue;   // clearly a content photo
+        if (sp.score >= MIN_DIVIDER_SCORE) continue; // already picked above
+        const prevIdx = sp.idx - 1;
+        const nextIdx = sp.idx + 1;
+        const prevScore = prevIdx >= 0 ? (scoreByIdx.get(prevIdx) ?? 999) : -1;
+        const nextScore = nextIdx < allPhotoInfos.length ? (scoreByIdx.get(nextIdx) ?? 999) : -1;
+        // Neighbors must look like content (low score). Treat missing
+        // neighbors (first/last photo) as content-like too.
+        const prevIsContent = prevScore < 150 || prevScore === -1;
+        const nextIsContent = nextScore < 150 || nextScore === -1;
+        // Don't rescue photos adjacent to an already-picked divider (that
+        // means the divider run is already accounted for).
+        const prevIsDivider = dividerSet.has(prevIdx);
+        const nextIsDivider = dividerSet.has(nextIdx);
+        if (prevIsContent && nextIsContent && !prevIsDivider && !nextIsDivider) {
+          rescueCandidates.push(sp);
+        }
+      }
+      // Rescue in score order, highest first, until we hit expected.
+      const rescued = [];
+      for (const sp of rescueCandidates) {
+        if (dividerSet.size >= expectedDividers) break;
+        dividerSet.add(sp.idx);
+        rescued.push(`idx=${sp.idx} score=${sp.score.toFixed(0)} file=${allPhotoInfos[sp.idx]?.filename || "?"}`);
+      }
+      if (rescued.length > 0) {
+        jnjLog("DIVIDER-RESCUE", `rescued ${rescued.length} via neighbor context:`, rescued.join(" | "));
+      }
+    }
+
     // Log the score distribution so we can tune if needed.
     jnjLog("DIVIDER-PICK",
       `expected=${expectedDividers}`,
