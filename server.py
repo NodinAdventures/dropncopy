@@ -13,6 +13,7 @@ import json
 import re
 import uuid
 import zipfile
+from datetime import datetime
 from typing import List, Tuple, Dict, Any, Optional
 
 import os
@@ -1752,11 +1753,41 @@ async def jnj_zip(
             continue
         photos_by_item.setdefault(target, []).append(p)
 
+    # --- v25.14: match J&J's real working sample exactly --------------------
+    # J&J's own sample CSV (1-2.csv) uses:
+    #   image_1 = "..\Pictures\2026-04-07 TEST\TEST 001.webp"
+    # i.e. Windows backslash paths pointing into a Pictures/<sale-folder>/
+    # subfolder, with sequential names "<PREFIX> NNN.<ext>".
+    #
+    # We mirror that layout so their importer resolves photos identically to
+    # a hand-built upload.
+    #
+    # Sale folder name: use the sale_name if present, otherwise a date-tagged
+    # fallback so ZIPs from different sales don't collide if J&J extracts them
+    # into a shared Pictures/ tree.
+    def _folder_slug(s: str) -> str:
+        s = (s or "").strip()
+        if not s:
+            s = datetime.utcnow().strftime("%Y-%m-%d SALE")
+        # Keep letters, digits, spaces, dashes; collapse whitespace.
+        s = re.sub(r"[^A-Za-z0-9 \-]+", " ", s)
+        s = re.sub(r"\s+", " ", s).strip()
+        return s or "SALE"
+
+    sale_folder = _folder_slug(sale_name)
+    # Uppercase prefix inside filenames matches J&J's sample ("TEST 001.webp").
+    photo_prefix = sale_folder.upper()
+    # ---------------------------------------------------------------------
+
     # Build the zip in memory
     zip_buf = io.BytesIO()
     csv_buf = io.StringIO()
     writer = csv.DictWriter(csv_buf, fieldnames=JNJ_CSV_COLUMNS, quoting=csv.QUOTE_MINIMAL)
     writer.writeheader()
+
+    # Sale-wide photo counter so filenames are sequential across items,
+    # matching J&J's sample (TEST 001, TEST 002, TEST 003 …).
+    sale_photo_seq = 0
 
     # For each item build a row and, if it has photos, name them + fill image_1..N
     photo_files: List[Tuple[str, bytes]] = []  # (name_in_zip, bytes)
@@ -1774,21 +1805,22 @@ async def jnj_zip(
         )
         # Title cap is enforced inside build_jnj_csv_row.
 
-        # Rename photos for this item using the same code that becomes the Title
-        # prefix: {item_num}A{lot_code} or {item_num}AS. This keeps photo names
-        # aligned with the CSV Title so JnJ staff can trace them.
-        item_code = f"{item_num}A{lot_code}" if lot_code else f"{item_num}AS"
         item_photos = photos_by_item.get(item_num, [])
         for photo_idx, p in enumerate(item_photos[:20], start=1):
             ext = (p.filename or "photo.jpg").rsplit(".", 1)[-1].lower()
             if ext not in ("jpg", "jpeg", "png", "webp", "gif", "bmp", "heic"):
                 ext = "jpg"
-            new_name = f"{item_code}_{photo_idx:03d}.{ext}"
+            # J&J-style sequential name: "<PREFIX> NNN.<ext>", zero-padded to 3.
+            sale_photo_seq += 1
+            leaf_name = f"{photo_prefix} {sale_photo_seq:03d}.{ext}"
+            zip_path = f"Pictures/{sale_folder}/{leaf_name}"
+            # image_N cell uses backslashes + leading ..\ like J&J's own sample.
+            csv_ref = f"..\\Pictures\\{sale_folder}\\{leaf_name}"
             data = await p.read()
             # Reset the file position so we don't consume it if it's used again
             await p.seek(0)
-            photo_files.append((new_name, data))
-            row[f"image_{photo_idx}"] = new_name
+            photo_files.append((zip_path, data))
+            row[f"image_{photo_idx}"] = csv_ref
 
         writer.writerow(row)
 
