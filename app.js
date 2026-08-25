@@ -10,7 +10,51 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-25-multi-sheet-staging-v23";
+const BUILD_ID = "2026-08-25-persistent-debug-v24";
+
+// v24: capture EVERYTHING that happens during a build so we can see
+// silent failures. Wraps console.log/warn/error and fetch, and keeps
+// the last 500 events in memory. The "Show debug log" button on any
+// error banner prints them all in a copyable overlay.
+window.__jnjDebugLog = [];
+function jnjLog(kind, ...args) {
+  try {
+    const stamp = new Date().toISOString().slice(11, 23);
+    const msg = args.map(a => {
+      if (a instanceof Error) return `${a.name}: ${a.message}${a.stack ? "\n" + a.stack : ""}`;
+      if (typeof a === "object") {
+        try { return JSON.stringify(a); } catch { return String(a); }
+      }
+      return String(a);
+    }).join(" ");
+    window.__jnjDebugLog.push(`[${stamp}] [${kind}] ${msg}`);
+    if (window.__jnjDebugLog.length > 500) window.__jnjDebugLog.shift();
+  } catch {}
+}
+// Mirror console.log/warn/error into the debug log without breaking the console.
+["log", "warn", "error", "info"].forEach(k => {
+  const orig = console[k].bind(console);
+  console[k] = (...args) => { jnjLog(k.toUpperCase(), ...args); orig(...args); };
+});
+// Catch unhandled promise rejections and top-level errors.
+window.addEventListener("error", e => jnjLog("WINDOW-ERROR", e.message, "at", e.filename + ":" + e.lineno));
+window.addEventListener("unhandledrejection", e => jnjLog("UNHANDLED", e.reason && e.reason.message || e.reason));
+// Wrap fetch to log every request/response so we can see backend calls.
+const __origFetch = window.fetch.bind(window);
+window.fetch = async (...args) => {
+  const url = typeof args[0] === "string" ? args[0] : (args[0] && args[0].url) || "?";
+  const method = (args[1] && args[1].method) || "GET";
+  jnjLog("FETCH-REQ", method, url);
+  try {
+    const resp = await __origFetch(...args);
+    jnjLog("FETCH-RESP", method, url, "->", resp.status, resp.statusText);
+    return resp;
+  } catch (err) {
+    jnjLog("FETCH-FAIL", method, url, "->", err.message);
+    throw err;
+  }
+};
+jnjLog("BOOT", "v24 debug logging active. BUILD_ID:", "2026-08-25-persistent-debug-v24");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -1010,7 +1054,14 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v23 · ${BUILD_ID}`;
+  badge.textContent = `v24 · ${BUILD_ID}`;
+  // v24: clicking the badge opens the debug log overlay — same as the error
+  // banner button, but lets the user check the log even when things went
+  // "fine" (e.g. build ran but nothing happened afterward).
+  badge.style.pointerEvents = "auto";
+  badge.style.cursor = "pointer";
+  badge.title = "Click to view debug log";
+  badge.addEventListener("click", () => jnjShowDebugOverlay());
   document.body.appendChild(badge);
 } catch {}
 
@@ -1404,7 +1455,22 @@ async function jnjHandleFiles(input) {
     }
 
     jnjState = { items, photos: photoMap, itemPhotos, unmatched };
+    jnjLog("BUILD-COMPLETE", `items=${items.length}`, `photos=${photoMap.size}`, `unmatched=${unmatched.length}`);
     jnjRenderPreview();
+    // v24: verify preview actually became visible — if it didn't, something is
+    // hiding it. Log and force it visible.
+    setTimeout(() => {
+      const isHidden = jnjPreview.classList.contains("hidden");
+      const style = window.getComputedStyle(jnjPreview);
+      jnjLog("PREVIEW-CHECK", `hidden=${isHidden}`, `display=${style.display}`, `visibility=${style.visibility}`, `offsetHeight=${jnjPreview.offsetHeight}`);
+      if (isHidden || style.display === "none") {
+        jnjLog("PREVIEW-FORCE", "preview was hidden after build — forcing visible");
+        jnjPreview.classList.remove("hidden");
+        jnjPreview.style.display = "";
+      }
+      // Scroll into view so the user can see it.
+      try { jnjPreview.scrollIntoView({ behavior: "smooth", block: "start" }); } catch {}
+    }, 100);
   } catch (err) {
     console.error("JnJ build error:", err);
     statusEl.textContent = err.message || "failed";
@@ -1414,8 +1480,11 @@ async function jnjHandleFiles(input) {
   }
 }
 
-// Persistent error banner — stays until user dismisses it.
+// v24: Persistent error banner — never auto-dismisses, includes a "Show debug log"
+// button that opens a full-screen overlay with every logged event, plus a
+// "Copy log" button so the user can paste the full log back to me.
 function jnjShowErrorBanner(msg) {
+  jnjLog("ERROR-BANNER", msg);
   let banner = document.getElementById("jnjErrorBanner");
   if (!banner) {
     banner = document.createElement("div");
@@ -1425,11 +1494,55 @@ function jnjShowErrorBanner(msg) {
   }
   banner.innerHTML = `
     <div style="font-weight:600;margin-bottom:4px;">JnJ Sale Builder — error</div>
-    <div id="jnjErrorBannerMsg" style="font-size:13px;opacity:0.95;word-break:break-word;"></div>
+    <div id="jnjErrorBannerMsg" style="font-size:13px;opacity:0.95;word-break:break-word;margin-bottom:10px;"></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+      <button type="button" id="jnjShowLogBtn" style="background:#ff5252;border:none;color:#fff;font-size:13px;font-weight:600;padding:8px 14px;border-radius:6px;cursor:pointer;">Show debug log</button>
+      <button type="button" id="jnjCopyMsgBtn" style="background:transparent;border:1px solid #ff5252;color:#ff8a8a;font-size:13px;padding:8px 14px;border-radius:6px;cursor:pointer;">Copy error message</button>
+    </div>
     <button type="button" aria-label="Dismiss" style="position:absolute;top:8px;right:8px;background:transparent;border:none;color:#fff;font-size:22px;line-height:1;cursor:pointer;padding:4px 10px;">×</button>
   `;
   banner.querySelector("#jnjErrorBannerMsg").textContent = msg;
-  banner.querySelector("button").onclick = () => banner.remove();
+  banner.querySelector("[aria-label='Dismiss']").onclick = () => banner.remove();
+  banner.querySelector("#jnjShowLogBtn").onclick = () => jnjShowDebugOverlay();
+  banner.querySelector("#jnjCopyMsgBtn").onclick = () => {
+    copyText(msg);
+  };
+}
+
+// v24: Full-screen debug log overlay. Shows the last 500 events as monospace
+// text with a big "Copy all" button so the user can paste it back to me.
+function jnjShowDebugOverlay() {
+  let overlay = document.getElementById("jnjDebugOverlay");
+  if (overlay) overlay.remove();
+  overlay = document.createElement("div");
+  overlay.id = "jnjDebugOverlay";
+  overlay.style.cssText = "position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.92);color:#eee;padding:20px;display:flex;flex-direction:column;gap:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;";
+  const log = (window.__jnjDebugLog || []).join("\n") || "(no events logged yet)";
+  const summary = `BUILD_ID: ${BUILD_ID}\nURL: ${window.location.href}\nUserAgent: ${navigator.userAgent}\nEvents: ${(window.__jnjDebugLog || []).length}\n`;
+  overlay.innerHTML = `
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+      <div style="font-size:15px;font-weight:600;color:#7fff9f;flex:1;">Debug log — ${(window.__jnjDebugLog || []).length} events</div>
+      <button type="button" id="jnjDbgCopy" style="background:#7fff9f;color:#000;border:none;padding:10px 16px;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer;">Copy all</button>
+      <button type="button" id="jnjDbgClose" style="background:transparent;color:#eee;border:1px solid #666;padding:10px 16px;border-radius:6px;font-size:14px;cursor:pointer;">Close</button>
+    </div>
+    <textarea id="jnjDbgText" readonly style="flex:1;background:#0a0a0a;color:#c8ffce;border:1px solid #333;border-radius:6px;padding:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.4;white-space:pre;overflow:auto;resize:none;"></textarea>
+  `;
+  document.body.appendChild(overlay);
+  const ta = overlay.querySelector("#jnjDbgText");
+  ta.value = summary + "\n" + log;
+  overlay.querySelector("#jnjDbgClose").onclick = () => overlay.remove();
+  overlay.querySelector("#jnjDbgCopy").onclick = () => {
+    ta.select();
+    try {
+      navigator.clipboard.writeText(ta.value).then(
+        () => toast("Debug log copied — paste it to Ashley"),
+        () => { document.execCommand("copy"); toast("Debug log copied"); }
+      );
+    } catch {
+      document.execCommand("copy");
+      toast("Debug log copied");
+    }
+  };
 }
 
 function jnjRenderPreview() {
