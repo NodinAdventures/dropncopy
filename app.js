@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-25-seller-pill-per-item-v25.9";
+const BUILD_ID = "2026-08-25-mid-sheet-boundary-v25.10";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v25.9 boot. BUILD_ID:", "2026-08-25-seller-pill-per-item-v25.9");
+jnjLog("BOOT", "v25.10 boot. BUILD_ID:", "2026-08-25-mid-sheet-boundary-v25.10");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -1054,7 +1054,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v25.9 · ${BUILD_ID}`;
+  badge.textContent = `v25.10 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
@@ -1225,19 +1225,33 @@ async function jnjHandleFiles(input) {
       // group whenever we cross that group's first_item_num.
       const rawItems = sd.items || [];
       const normItem = (v) => String(v || "").replace(/[^A-Za-z0-9]/g, "").toLowerCase();
+      // v25.10: item numbers can be numeric (2000, 2001, 2004) so compare
+      // them numerically when both sides look like integers — that way if
+      // the OCR reads the boundary as 2004 but the actual items in the sheet
+      // start at 2003, we still advance when we hit 2003+ instead of never.
+      const asInt = (s) => {
+        const m = /^([0-9]+)/.exec(String(s || ""));
+        return m ? parseInt(m[1], 10) : NaN;
+      };
       let groupIdx = -1; // -1 = before any group; use "" seller until we hit one
-      let nextChangeAt = sellerGroups.length ? normItem(sellerGroups[0].first_item_num) : "";
-      const itemsFromSheet = rawItems.map(it => {
+      const itemsFromSheet = rawItems.map((it, itemIdx) => {
         const itemNum = normItem(it.item_num || it.LotNumber || it.lot_number || "");
-        // Advance groupIdx if the current item matches (or has passed) the next group's start.
+        const itemInt = asInt(itemNum);
+        // Advance groupIdx if we've reached the next group's start.
+        // "Reached" means: first item on the sheet (group 0 always covers
+        // the first item), OR item matches boundary exactly, OR item's
+        // numeric value has met/passed the boundary's numeric value.
         while (groupIdx + 1 < sellerGroups.length) {
           const boundary = normItem(sellerGroups[groupIdx + 1].first_item_num);
-          if (!boundary) break; // no known boundary — stay in current group
-          if (itemNum === boundary || (groupIdx === -1)) {
-            // First item OR exact-match boundary: advance.
+          const boundaryInt = asInt(boundary);
+          const isFirstItem = itemIdx === 0;
+          const exactMatch = boundary && itemNum === boundary;
+          const numericPassed = !isNaN(itemInt) && !isNaN(boundaryInt) && itemInt >= boundaryInt;
+          if (isFirstItem || exactMatch || numericPassed) {
             groupIdx += 1;
-            nextChangeAt = groupIdx + 1 < sellerGroups.length ? normItem(sellerGroups[groupIdx + 1].first_item_num) : "";
-            if (itemNum !== boundary) break;
+            // If we advanced only because it's the very first item and there's
+            // no known boundary yet, don't keep advancing.
+            if (!exactMatch && !numericPassed) break;
           } else {
             break;
           }
