@@ -131,10 +131,11 @@
           <span>Category / Sale name</span>
           <input id="jnjSaleName" type="text" placeholder="AUGUST 27~ H SALE" />
         </label>
-        <label class="jnj-field">
-          <span>Seller ID prefix</span>
-          <input id="jnjSellerId" type="text" placeholder="AA" />
-        </label>
+        <!-- v25.12: Seller ID prefix removed from the top — each item card now
+             carries its own editable purple SELLER pill sourced from that sheet's
+             boxed number. Seller ID is still kept as a hidden input so the
+             existing CSV plumbing that references it keeps working. -->
+        <input id="jnjSellerId" type="hidden" value="" />
         <label class="jnj-field">
           <span>Starting number</span>
           <input id="jnjSellerStart" type="number" placeholder="1000" />
