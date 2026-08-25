@@ -694,7 +694,11 @@ JNJ_CSV_COLUMNS = [
     "image_6", "image_7", "image_8", "image_9", "image_10",
     "image_11", "image_12", "image_13", "image_14", "image_15",
     "image_16", "image_17", "image_18", "image_19", "image_20",
-    "cf_SellerID",
+    # v25.32: three separate ID fields per Ashley's rule — do not glue them.
+    # cf_SellerID   = seller's ID from the boxed number at top of sheet (AA3102)
+    # cf_LotNumber  = left column on the sheet (3022, 3023, ...) — the lot #
+    # cf_Location   = right column on the sheet (38B, 37B, ...) — storage bin
+    "cf_SellerID", "cf_LotNumber", "cf_Location",
 ]
 
 # Default field values matching JnJ's sample CSV (April 16 Q Sale).
@@ -781,27 +785,23 @@ def build_jnj_csv_row(item_num: str, lot_code: str, description: str,
     """
     Build one row of the JnJ CSV.
 
-    Title format matches JnJ's real sample CSV:
-      '7936AS TALL FREESTANDING JEWLERY BOX'   (no lot code -> AS)
-      '7937AS WINCHESTER 12 GUN GUN SAFE'      (no lot code -> AS)
-      '7938A15C HAMMS BEER SIGN'               (lot code 15C -> A15C)
-      '7939A9B HOMEDICS FOOT MASSAGER NEW'     (lot code 9B  -> A9B)
+    v25.32 — THREE SEPARATE ID FIELDS per Ashley's rule ("do not put them
+    together"):
+      - cf_SellerID  = seller ID from boxed number at top of sheet (e.g. AA3102)
+      - cf_LotNumber = left column on the sheet (e.g. 3022) — what J&J calls
+                       the LOT NUMBER. Parsed into `item_num` by our OCR.
+      - cf_Location  = right column on the sheet (e.g. 38B) — storage bin,
+                       parsed into `lot_code` by our OCR (misnamed for
+                       historical reasons; the variable is the location).
 
-    Pattern: {item_num}A{lot_code} {DESCRIPTION}
-    When no lot code:   {item_num}AS {DESCRIPTION}
+    Title is JUST the description now — no more `3022A38B` glued prefix.
+    Description also stamps all three IDs at the top so they're visible on
+    the listing even if J&J's importer ignores the custom columns.
 
-    Title is capped at 60 characters per JnJ's spec (Admin CSV Help column D).
-
-    Description column = just the plain description (no item# or lot code).
-
-    cf_SellerID = the seller's ID from the sheet header (e.g. 'AA1961').
-    All rows on one intake sheet share the same seller ID.
+    Title cap: 60 chars per JnJ spec (Admin CSV Help column D).
     """
-    if lot_code:
-        title = f"{item_num}A{lot_code} {description}"
-    else:
-        title = f"{item_num}AS {description}"
-    # Enforce Title max 60 chars per JnJ spec
+    # v25.32: Title is now the plain description. J&J shows it on the listing.
+    title = description
     if len(title) > 60:
         title = title[:60].rstrip()
 
@@ -809,24 +809,37 @@ def build_jnj_csv_row(item_num: str, lot_code: str, description: str,
     row.update(JNJ_DEFAULTS)
     row["Category"] = sale_name
     row["Title"] = title
-    row["Description"] = description
-    # StartBid must have a value for auction listing format
-    row["StartBid"] = "$1.00 "
-    # cf_SellerID (v25.23): ALWAYS "AA" + number, no exceptions.
-    # Ashley's rule: the ID Code column must always look like AA721, AA1000, etc.
-    # We take the number from (in order): the boxed sheet number, then the
-    # seller_id field if it has digits, then the seller_seq counter. Any letters
-    # on the number are stripped so we never end up with "AAAA721".
+
+    # cf_SellerID (v25.23 + v25.32): ALWAYS "AA" + number, no exceptions.
+    # Number comes from (in order): boxed per-item seller num, sheet-level
+    # seller_id if it has digits, then the fallback counter. Letters stripped.
     per_item_seller = (per_item_seller or "").strip()
     per_item_digits = "".join(c for c in per_item_seller if c.isdigit())
     seller_id_digits = "".join(c for c in (seller_id or "") if c.isdigit())
     if per_item_digits:
-        number = per_item_digits
+        seller_number = per_item_digits
     elif seller_id_digits:
-        number = seller_id_digits
+        seller_number = seller_id_digits
     else:
-        number = str(seller_seq)
-    row["cf_SellerID"] = f"AA{number}"
+        seller_number = str(seller_seq)
+    row["cf_SellerID"] = f"AA{seller_number}"
+
+    # v25.32: lot number and location kept SEPARATE. No gluing.
+    row["cf_LotNumber"] = item_num or ""
+    row["cf_Location"] = lot_code or ""
+
+    # v25.32: stamp all three IDs into the Description so they're readable
+    # on the live J&J listing even if the importer ignores cf_LotNumber /
+    # cf_Location. Format keeps them visually separated (no gluing).
+    id_stamp_parts = [f"Seller: AA{seller_number}"]
+    if item_num:
+        id_stamp_parts.append(f"Lot: {item_num}")
+    if lot_code:
+        id_stamp_parts.append(f"Location: {lot_code}")
+    id_stamp = " | ".join(id_stamp_parts)
+    row["Description"] = f"{id_stamp}\n\n{description}" if description else id_stamp
+
+    row["StartBid"] = "$1.00 "
     return row
 
 
