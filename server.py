@@ -541,40 +541,41 @@ def compute_divider_score(image_bytes: bytes) -> float:
             gray_full = gray.copy()
             gray.close()
 
-            # v25.36: the JnJ watermark's position depends on the photo's
-            # original orientation — landscape puts it at the bottom, portrait
-            # puts it in the middle (Ashley's IMG_2925 shows FILE 13 178
-            # with the watermark reading straight across the middle of the
-            # portrait frame, NOT along any edge). Cropping edges doesn't
-            # reliably remove it.
+            # v25.37: sliding-window darkest-patch scoring. v25.36 used
+            # 4 quadrants, but Ashley reported another portrait divider
+            # (item 3022) still getting missed — the watermark on that
+            # divider was big enough to touch all four quadrants.
             #
-            # Better approach: divide the photo into 4 quadrants and score
-            # each. A TRUE divider has AT LEAST ONE quadrant that's almost
-            # perfectly black — the corner the watermark doesn't touch. A
-            # real item photo has content in every quadrant. Pick the
-            # DARKEST/FLATTEST quadrant as our measurement.
-            def quad_metrics(box):
-                q = gray_full.crop(box)
-                st = ImageStat.Stat(q)
-                m, sd = st.mean[0], st.stddev[0]
-                eg = q.filter(ImageFilter.FIND_EDGES)
-                em = ImageStat.Stat(eg).mean[0]
-                eg.close()
-                q.close()
-                return (m, sd, em)
-
-            quads = [
-                (0, 0, w // 2, h // 2),           # top-left
-                (w // 2, 0, w, h // 2),           # top-right
-                (0, h // 2, w // 2, h),           # bottom-left
-                (w // 2, h // 2, w, h),           # bottom-right
-            ]
-            metrics = [quad_metrics(b) for b in quads]
-            # Pick the quadrant with the LOWEST mean (darkest) — that's the
-            # part of the frame the watermark isn't in. For a real divider,
-            # this quadrant is essentially perfect black.
-            best = min(metrics, key=lambda m: m[0])
-            mean, stddev, edge_mean = best
+            # New approach: scan the photo with a small 40x40 sliding
+            # window (about 1/6 of the frame) and find the darkest patch.
+            # A real divider has HUGE swaths of pure black outside its
+            # watermark, so at least one 40x40 patch will score near-
+            # perfect black. A real item photo, even a dark one, has
+            # texture/edges across the whole frame — no 40x40 patch will
+            # be as clean.
+            #
+            # Cost: ~30ms per photo instead of ~10ms. Still fine.
+            PATCH = 40
+            STRIDE = 20
+            best_mean = 999.0
+            best_stddev = 999.0
+            best_edge = 999.0
+            for y in range(0, max(1, h - PATCH), STRIDE):
+                for x in range(0, max(1, w - PATCH), STRIDE):
+                    patch = gray_full.crop((x, y, x + PATCH, y + PATCH))
+                    pst = ImageStat.Stat(patch)
+                    pm = pst.mean[0]
+                    # Early-exit: if mean is high, skip the edge check.
+                    if pm >= best_mean:
+                        patch.close()
+                        continue
+                    psd = pst.stddev[0]
+                    peg = patch.filter(ImageFilter.FIND_EDGES)
+                    pem = ImageStat.Stat(peg).mean[0]
+                    peg.close()
+                    patch.close()
+                    best_mean, best_stddev, best_edge = pm, psd, pem
+            mean, stddev, edge_mean = best_mean, best_stddev, best_edge
             gray_full.close()
 
         # v25.34: SHARPER scoring — award divider points only to photos that
@@ -608,7 +609,7 @@ def compute_divider_score(image_bytes: bytes) -> float:
         score = darkness + flatness + blankness
 
         try:
-            print(f"divider-score-v36: darkest_quad mean={mean:.1f} stddev={stddev:.1f} edge_mean={edge_mean:.2f} → score={score:.0f}", flush=True)
+            print(f"divider-score-v37: darkest_patch mean={mean:.1f} stddev={stddev:.1f} edge_mean={edge_mean:.2f} → score={score:.0f}", flush=True)
         except Exception:
             pass
 
