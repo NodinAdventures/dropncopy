@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-25-both-signals-required-v25.41";
+const BUILD_ID = "2026-08-25-strict-ai-divider-prompt-v25.42";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v25.41 boot. BUILD_ID:", "2026-08-25-both-signals-required-v25.41");
+jnjLog("BOOT", "v25.42 boot. BUILD_ID:", "2026-08-25-strict-ai-divider-prompt-v25.42");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -1085,7 +1085,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v25.41 · ${BUILD_ID}`;
+  badge.textContent = `v25.42 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
@@ -1568,22 +1568,14 @@ async function jnjHandleFiles(input) {
     // around 300) get picked when the sheet needs them.
     const MIN_DIVIDER_SCORE = 200;
     const scoreByIdx = new Map();
-    // v25.41: BOTH-signals scoring. v25.40's blanket +900 for is_blank
-    // was too aggressive — the AI calls hand/floor/blurry-shot photos
-    // "no item" too, so those all got boosted and became false dividers.
-    //
-    // A real JnJ divider is DARK (pixel score >= 150 = definitely dark)
-    // AND the AI says no item. Non-divider blanks (hand shots, floor,
-    // blurry) fail the darkness check even when the AI says no item.
-    //
-    // Rule:
-    //   - AI said blank AND pixel score >= 150 → add +500 (near-guaranteed pick)
-    //   - AI said blank AND pixel score <  150 → no bonus (probably hand/floor)
-    //   - AI said item → use raw pixel score
+    // v25.42: AI prompt was rewritten to only say DIVIDER for pure
+    // uniform-color frames (NOT hands/floors/blurry). So the AI verdict
+    // is now precise enough to trust directly. Big +900 bonus if AI
+    // said divider, no pixel gate needed.
     for (let i = 0; i < allPhotoInfos.length; i++) {
       const p = allPhotoInfos[i];
       const raw = typeof p.divider_score === "number" ? p.divider_score : 0;
-      const aiBonus = (p.is_blank && raw >= 150) ? 500 : 0;
+      const aiBonus = p.is_blank ? 900 : 0;
       scoreByIdx.set(i, raw + aiBonus);
     }
 

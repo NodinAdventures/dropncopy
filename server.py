@@ -1711,14 +1711,13 @@ async def jnj_match_photos(
                             "role": "user",
                             "content": [
                                 {"type": "text", "text": (
-                                    "This is a photo from an estate auction. EVERY photo (both real items and divider slides) has an 'JNJ ONLINE AUCTION - FREMONT' watermark burned into the bottom of the image. IGNORE that watermark completely when deciding your answer. Look at what's ABOVE the watermark.\n\n"
-                                    "There are exactly two types of photos:\n"
-                                    "  1. REAL ITEM PHOTOS: show an actual object being sold \u2014 furniture, lamp, tool, appliance, art, box, collectible, decor, vehicle, or anything else being auctioned. The item fills most of the frame above the watermark.\n"
-                                    "  2. DIVIDER SLIDES: the photo ABOVE the watermark is essentially empty \u2014 all black, all white, all gray, all one color, or otherwise contains NO auction item at all. These slides are used to separate one item from the next.\n\n"
+                                    "This is a photo from an estate auction. EVERY photo has a 'JNJ ONLINE AUCTION - FREMONT' watermark somewhere in the frame \u2014 IGNORE the watermark text completely.\n\n"
+                                    "A DIVIDER SLIDE is a photo where the ENTIRE frame (aside from the watermark) is one uniform solid color \u2014 typically ALL BLACK, occasionally all white or all gray. There is NO subject, NO texture, NO object, NO scene. Just uniform color like a photo of a piece of black cardboard or an unlit surface.\n\n"
+                                    "A REAL ITEM PHOTO has ANY visible subject or scene: furniture, tools, decor, boxes, hands, floor, wall, ceiling, blurry motion, dark object with reflections, dark corner of a room, ANYTHING that isn't a uniform color field.\n\n"
+                                    "CRITICAL: hands, floors, blurry shots, dark objects on dark backgrounds \u2014 ALL of these are ITEM photos, NOT dividers. A divider looks like a black rectangle with just the JnJ watermark on it \u2014 nothing else in the frame at all.\n\n"
                                     "Reply with EXACTLY one word:\n\n"
-                                    "NO    - the area above the JNJ watermark is empty (solid black/white/color, blurry, no item visible). This is a divider slide.\n"
-                                    "YES   - the area above the JNJ watermark contains a real physical item being sold. This is a real item photo.\n\n"
-                                    "Do NOT let the JNJ watermark text influence your answer \u2014 it's on ALL photos. Only look at whether there's an actual item in the frame above it."
+                                    "DIVIDER - the frame is one uniform solid color, no subject at all beyond the watermark. Like a blank black slide.\n"
+                                    "ITEM    - anything else, including hands, floors, blurry photos, dark scenes with any visible objects or texture."
                                 )},
                                 {"type": "image_url", "image_url": {
                                     "url": f"data:image/jpeg;base64,{ai_thumb_b64}",
@@ -1730,11 +1729,12 @@ async def jnj_match_photos(
                         temperature=0,
                     )
                     answer = (resp.choices[0].message.content or "").strip().lower()
-                    # v25.7: drop MAYBE — treat any non-"no" as YES. We only want
-                    # the AI to flag TRUE empty frames as blank; the deterministic
-                    # is_divider_photo check above already catches the real black
-                    # dividers. If the AI is unsure, we default to YES (real item).
-                    if answer.startswith("n"):
+                    # v25.42: prompt now asks the AI to say DIVIDER vs ITEM.
+                    # We treat 'divider' as blank; anything else (including
+                    # 'item', 'no', empty, error) is a real item. This is
+                    # narrower than the old prompt which asked YES/NO and
+                    # got too many 'no' answers for hands/floors/blurry.
+                    if answer.startswith("d"):
                         first_pass = "no"
                 except Exception as e:
                     print(f"has-item check failed for {filename}: {type(e).__name__}: {e}", flush=True)
