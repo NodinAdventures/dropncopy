@@ -663,6 +663,10 @@ JNJ_DEFAULTS = {
     # when EndDate (col U) is blank. 7 days is J&J's typical auction run;
     # frontend can override via the sale dialog.
     "Duration": "7",
+    # v25.24: Ashley wants "Homepage Gallery Free of Charge" always checked.
+    # J&J's Admin-CSV-Help.html lists GalleryListing (col AB) as "1 or 0".
+    # Setting to 1 turns on the gallery listing for every item.
+    "GalleryListing": "1",
 }
 
 
