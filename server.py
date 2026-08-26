@@ -1024,12 +1024,14 @@ def build_jnj_csv_row(item_num: str, lot_code: str, description: str,
                        parsed into `lot_code` by our OCR (misnamed for
                        historical reasons; the variable is the location).
 
-    v25.53 — Title format restored to yesterday's glued style per
-    Ashley's Aug 26 correction ("put them together like yesterday"):
-        '{item_num}{lot_code} {description}'
-        e.g. '5448J5A 10 ASSORTED GUMMIES'
-        e.g. '1496J30B USED PROSPORT ERGOMASTER BIKE'
-    If lot_code is missing, we just drop it and leave item_num + description.
+    v25.54 — Title format includes the sale letter between Lot and Location:
+        '{item_num}{SALE_LETTER}{lot_code} {description}'
+        e.g. sale 'SEPTEMBER 3 ~ J SALE' → '1500J72B USED WORKING GRAY 2 PIECE'
+        e.g. sale 'AUGUST 27 H SALE'    → '9749H15C CLASSIC FOOD MASTER SHREDDER'
+    The letter is extracted from the sale_name — the single A-Z that
+    immediately precedes the word 'SALE'. Falls back to '' if we can't
+    find one, so the title still renders (just without the separator).
+    If lot_code is missing, we drop it entirely and leave item_num + description.
 
     The "do not put them together" rule from v25.32 still applies to the
     Description field (stamped with `Seller: ... | Lot: ... | Location: ...`
@@ -1039,9 +1041,17 @@ def build_jnj_csv_row(item_num: str, lot_code: str, description: str,
 
     Title cap: 60 chars per JnJ spec (Admin CSV Help column D).
     """
-    # v25.53: glued title — restores yesterday's working format.
+    # v25.54: extract the sale letter (e.g. 'J' from 'SEPTEMBER 3 ~ J SALE').
+    # Match a single A-Z with word boundaries just before the literal 'SALE'.
+    sale_letter = ""
+    if sale_name:
+        m = re.search(r"\b([A-Z])\s*SALE\b", sale_name.upper())
+        if m:
+            sale_letter = m.group(1)
+
+    # v25.53/54: glued title with sale letter as separator.
     if item_num and lot_code:
-        title = f"{item_num}{lot_code} {description}"
+        title = f"{item_num}{sale_letter}{lot_code} {description}"
     elif item_num:
         title = f"{item_num} {description}"
     else:
