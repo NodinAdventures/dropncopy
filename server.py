@@ -25,32 +25,57 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 
-# v25.45: OpenCV for QR code divider detection. Import lazily so a
-# missing lib doesn't crash startup — photos just fall back to the
-# old pixel-scoring path if cv2 isn't available.
+# v25.49: WeChat QR detector — dramatically more robust than the stock
+# OpenCV QRCodeDetector. Works on tilted, wrinkled, low-contrast, and
+# small-in-frame QR codes without needing model files. Import lazily so
+# a missing lib doesn't crash startup.
 try:
     import cv2  # type: ignore
     import numpy as np  # type: ignore
     _HAS_CV2 = True
-    _QR_DETECTOR = cv2.QRCodeDetector()
+    _QR_DETECTOR = cv2.QRCodeDetector()  # stock, as fallback
+    # WeChat model works WITHOUT the trained files — falls back to a
+    # simpler detector but still much better than stock QRCodeDetector.
+    try:
+        _WECHAT_QR = cv2.wechat_qrcode.WeChatQRCode()
+        _HAS_WECHAT = True
+        print("v25.49: WeChatQRCode detector loaded", flush=True)
+    except Exception as _wc_err:
+        print(f"WeChatQRCode unavailable ({_wc_err}); using stock only", flush=True)
+        _WECHAT_QR = None
+        _HAS_WECHAT = False
 except Exception as _cv_err:
     print(f"cv2 QR support disabled: {_cv_err}", flush=True)
     _HAS_CV2 = False
     _QR_DETECTOR = None
+    _WECHAT_QR = None
+    _HAS_WECHAT = False
 
 
-def _try_decode_qr(arr) -> str:
-    """Try both single- and multi-QR decode, return decoded text (first non-empty)."""
+def _wechat_decode(arr) -> str:
+    """Try WeChat detector — returns first decoded text or ''"""
+    if not _HAS_WECHAT or _WECHAT_QR is None:
+        return ""
+    try:
+        results, _points = _WECHAT_QR.detectAndDecode(arr)
+        for r in results:
+            if r:
+                return r
+    except Exception as e:
+        print(f"wechat decode failed: {type(e).__name__}: {e}", flush=True)
+    return ""
+
+
+def _stock_decode(arr) -> str:
+    """Try stock OpenCV detector, both single and multi."""
     if _QR_DETECTOR is None:
         return ""
-    # 1) Single-QR path
     try:
         data, _pts, _ = _QR_DETECTOR.detectAndDecode(arr)
         if data:
             return data
     except Exception:
         pass
-    # 2) Multi-QR path — works when there are stray QR-like textures too
     try:
         ok, datas, _pts, _ = _QR_DETECTOR.detectAndDecodeMulti(arr)
         if ok and datas:
@@ -62,76 +87,67 @@ def _try_decode_qr(arr) -> str:
     return ""
 
 
-def _has_qr_structure(arr) -> bool:
-    """Return True if OpenCV detects a QR-like pattern in the image,
-    even if the text can't be decoded. This is a fallback for hard cases
-    (small QR, motion blur, extreme angle) where we can still see the
-    finder patterns but the payload is unreadable. Any 3-square finder
-    pattern is treated as "probably the divider card" because Dave only
-    ever photographs one kind of QR.
-    """
-    if _QR_DETECTOR is None:
-        return False
-    try:
-        # detect() returns points array (Nx4x2) when a QR is found, None otherwise.
-        found, points = _QR_DETECTOR.detect(arr)
-        if found and points is not None and len(points) > 0:
-            return True
-    except Exception:
-        pass
-    try:
-        found, points = _QR_DETECTOR.detectMulti(arr)
-        if found and points is not None and len(points) > 0:
-            return True
-    except Exception:
-        pass
-    return False
+def _try_all_detectors(arr) -> str:
+    """Try WeChat first (much better), then stock as fallback."""
+    text = _wechat_decode(arr)
+    if text:
+        return text
+    return _stock_decode(arr)
 
 
 def detect_divider_qr(raw_bytes: bytes) -> bool:
     """Return True if this photo contains the printable DIVIDER card.
 
-    v25.46: much more forgiving — tries multiple sizes, both orientations
-    (original + inverted), and multi-QR decoding. Also, if we can't decode
-    the payload but we DID detect a QR finder-pattern in the frame, we
-    treat that as a divider too. Dave only photographs one kind of QR,
-    so any QR at all is the divider card.
+    v25.49: uses WeChat QR detector (via opencv-contrib) as the primary
+    engine, with stock OpenCV as fallback. WeChat handles rotation up
+    to ~45 degrees, motion blur, small-in-frame QRs, and low-contrast
+    prints far better than the stock detector.
+
+    Approach:
+    1. Try WeChat on the full image at 2 scales
+    2. Try inverted (light QR on dark card)
+    3. Try contrast-enhanced (for pale prints)
+    4. Fall back to stock detector with same variants
+
+    The card payload is 'DROPNCOPY-DIVIDER'. We match on this substring
+    so both the single card and the numbered cards (DROPNCOPY-DIVIDER-001)
+    both work.
     """
-    if not _HAS_CV2 or _QR_DETECTOR is None:
+    if not _HAS_CV2:
         return False
     try:
         with Image.open(io.BytesIO(raw_bytes)) as img:
             rgb = img.convert("RGB")
 
-            # v25.46: try TWO scales. Big first (2048px) so small/distant
-            # QR cards are still detectable; then medium (1024px) as backup.
-            for max_dim in (2048, 1024):
+            # v25.49: multiple scales. Bigger = catches small QRs; smaller
+            # = faster and sometimes better for large in-frame QRs.
+            for max_dim in (2048, 1600, 1024):
                 work = rgb.copy()
                 work.thumbnail((max_dim, max_dim))
-                arr = np.array(work.convert("L"))
+                gray = np.array(work.convert("L"))
                 work.close()
 
-                # Try decode with the payload check
-                text = _try_decode_qr(arr)
+                # 1) WeChat on grayscale (best all-around)
+                text = _try_all_detectors(gray)
                 if text and "DROPNCOPY-DIVIDER" in text:
                     return True
-                # v25.46: if payload decoded but doesn't match, this is
-                # some OTHER QR (unlikely in Ashley's workflow but safe).
-                # Only claim divider if we see the exact payload.
-                if text:
-                    continue
 
-                # v25.46: no decode — try inverted (dark background, light QR).
-                arr_inv = 255 - arr
-                text_inv = _try_decode_qr(arr_inv)
-                if text_inv and "DROPNCOPY-DIVIDER" in text_inv:
+                # 2) Inverted (light QR on dark background)
+                inv = 255 - gray
+                text = _try_all_detectors(inv)
+                if text and "DROPNCOPY-DIVIDER" in text:
                     return True
 
-                # v25.46: still nothing decoded — fall back to structure
-                # detection. If OpenCV finds ANY QR finder-pattern in the
-                # frame, we call it a divider. Dave only shoots this one
-                # QR card, so any QR = the card.
-                if _has_qr_structure(arr) or _has_qr_structure(arr_inv):
+                # 3) High-contrast (helps pale/faded prints)
+                enhanced = cv2.convertScaleAbs(gray, alpha=1.8, beta=-40)
+                text = _try_all_detectors(enhanced)
+                if text and "DROPNCOPY-DIVIDER" in text:
+                    return True
+
+                # 4) Otsu binarization (helps when lighting is uneven)
+                _, binarized = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                text = _try_all_detectors(binarized)
+                if text and "DROPNCOPY-DIVIDER" in text:
                     return True
 
             rgb.close()
