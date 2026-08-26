@@ -39,28 +39,103 @@ except Exception as _cv_err:
     _QR_DETECTOR = None
 
 
+def _try_decode_qr(arr) -> str:
+    """Try both single- and multi-QR decode, return decoded text (first non-empty)."""
+    if _QR_DETECTOR is None:
+        return ""
+    # 1) Single-QR path
+    try:
+        data, _pts, _ = _QR_DETECTOR.detectAndDecode(arr)
+        if data:
+            return data
+    except Exception:
+        pass
+    # 2) Multi-QR path — works when there are stray QR-like textures too
+    try:
+        ok, datas, _pts, _ = _QR_DETECTOR.detectAndDecodeMulti(arr)
+        if ok and datas:
+            for d in datas:
+                if d:
+                    return d
+    except Exception:
+        pass
+    return ""
+
+
+def _has_qr_structure(arr) -> bool:
+    """Return True if OpenCV detects a QR-like pattern in the image,
+    even if the text can't be decoded. This is a fallback for hard cases
+    (small QR, motion blur, extreme angle) where we can still see the
+    finder patterns but the payload is unreadable. Any 3-square finder
+    pattern is treated as "probably the divider card" because Dave only
+    ever photographs one kind of QR.
+    """
+    if _QR_DETECTOR is None:
+        return False
+    try:
+        # detect() returns points array (Nx4x2) when a QR is found, None otherwise.
+        found, points = _QR_DETECTOR.detect(arr)
+        if found and points is not None and len(points) > 0:
+            return True
+    except Exception:
+        pass
+    try:
+        found, points = _QR_DETECTOR.detectMulti(arr)
+        if found and points is not None and len(points) > 0:
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def detect_divider_qr(raw_bytes: bytes) -> bool:
     """Return True if this photo contains the printable DIVIDER card.
 
-    The card encodes the exact string 'DROPNCOPY-DIVIDER' (case-sensitive).
-    Uses OpenCV's built-in QRCodeDetector which handles rotation, mild
-    perspective distortion, and JPEG compression. High error-correction
-    on the card itself means wrinkles/shadows/glare are all fine.
-
-    Falls back to False silently if cv2 isn't available.
+    v25.46: much more forgiving — tries multiple sizes, both orientations
+    (original + inverted), and multi-QR decoding. Also, if we can't decode
+    the payload but we DID detect a QR finder-pattern in the frame, we
+    treat that as a divider too. Dave only photographs one kind of QR,
+    so any QR at all is the divider card.
     """
     if not _HAS_CV2 or _QR_DETECTOR is None:
         return False
     try:
         with Image.open(io.BytesIO(raw_bytes)) as img:
-            # Downscale huge photos before decode — QRCodeDetector is O(pixels).
-            # 1024px on the long side is plenty for a card that fills 1/3+ of frame.
-            gray = img.convert("L")
-            gray.thumbnail((1024, 1024))
-            arr = np.array(gray)
-            gray.close()
-        data, points, _ = _QR_DETECTOR.detectAndDecode(arr)
-        return bool(data) and "DROPNCOPY-DIVIDER" in data
+            rgb = img.convert("RGB")
+
+            # v25.46: try TWO scales. Big first (2048px) so small/distant
+            # QR cards are still detectable; then medium (1024px) as backup.
+            for max_dim in (2048, 1024):
+                work = rgb.copy()
+                work.thumbnail((max_dim, max_dim))
+                arr = np.array(work.convert("L"))
+                work.close()
+
+                # Try decode with the payload check
+                text = _try_decode_qr(arr)
+                if text and "DROPNCOPY-DIVIDER" in text:
+                    return True
+                # v25.46: if payload decoded but doesn't match, this is
+                # some OTHER QR (unlikely in Ashley's workflow but safe).
+                # Only claim divider if we see the exact payload.
+                if text:
+                    continue
+
+                # v25.46: no decode — try inverted (dark background, light QR).
+                arr_inv = 255 - arr
+                text_inv = _try_decode_qr(arr_inv)
+                if text_inv and "DROPNCOPY-DIVIDER" in text_inv:
+                    return True
+
+                # v25.46: still nothing decoded — fall back to structure
+                # detection. If OpenCV finds ANY QR finder-pattern in the
+                # frame, we call it a divider. Dave only shoots this one
+                # QR card, so any QR = the card.
+                if _has_qr_structure(arr) or _has_qr_structure(arr_inv):
+                    return True
+
+            rgb.close()
+        return False
     except Exception as e:
         print(f"QR detect failed: {type(e).__name__}: {e}", flush=True)
         return False
@@ -1741,14 +1816,14 @@ async def jnj_match_photos(
             # is a divider. Skip pixel scoring AND the AI call entirely,
             # slam divider_score to 1000 so the client picks it every time.
             has_divider_qr = detect_divider_qr(raw)
+            divider_score = compute_divider_score(raw)
             if has_divider_qr:
                 divider_score = 1000.0
                 first_pass = "no"
                 is_blank = True
                 print(f"divider-QR: {filename} DIVIDER CARD DETECTED — forcing divider", flush=True)
             else:
-                divider_score = compute_divider_score(raw)
-                print(f"divider-check: {filename} score={divider_score:.0f}", flush=True)
+                print(f"divider-check: {filename} score={divider_score:.0f} qr=none", flush=True)
             # Only trigger the AI "is this an item" fallback on photos that
             # scored VERY high (unambiguously divider-like). This keeps API
             # cost the same as before.
