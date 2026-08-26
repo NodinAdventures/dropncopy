@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-26-sanity-flags-v25.58";
+const BUILD_ID = "2026-08-26-sanity-flags-v25.59";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v25.58 boot. BUILD_ID:", "2026-08-26-sanity-flags-v25.58");
+jnjLog("BOOT", "v25.59 boot. BUILD_ID:", "2026-08-26-sanity-flags-v25.59");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -1108,7 +1108,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v25.58 · ${BUILD_ID}`;
+  badge.textContent = `v25.59 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
@@ -1799,12 +1799,29 @@ function jnjRenderPreview() {
       sellerCounts.forEach((c, s) => { if (c > bestCount) { bestCount = c; majoritySeller = s; } });
 
       // Lot sanity: look at numeric item_nums on this sheet.
-      // If a row's number is >5 away from BOTH neighbors AND both neighbors
-      // agree with each other (i.e. neighbors are consistent), flag this row.
+      // v25.59: use a MAJORITY-CLUSTER approach so misreads that stay
+      // internally sequential (e.g. 3062, 3063 read as 3022, 3023) still
+      // get caught. We find the biggest cluster of numbers that are
+      // close together (within ±10 of each other) and flag anything
+      // outside that cluster.
       const nums = rows.map(r => {
         const n = parseInt((r.it.item_num || "").replace(/[^0-9]/g, ""), 10);
         return Number.isFinite(n) ? n : null;
       });
+      const validNums = nums.filter(n => n !== null);
+      // Find the majority cluster: for each number, count how many other
+      // numbers on the sheet are within ±20 of it. The number with the
+      // most neighbors is the "anchor" of the majority cluster.
+      let anchor = null;
+      let anchorScore = 0;
+      const CLUSTER_RADIUS = 20;
+      validNums.forEach(n => {
+        const score = validNums.filter(m => Math.abs(m - n) <= CLUSTER_RADIUS).length;
+        if (score > anchorScore) { anchorScore = score; anchor = n; }
+      });
+      // Anchor must represent a real majority (≥50% of rows) before we
+      // trust it enough to flag outliers.
+      const isMajorityAnchor = anchor !== null && anchorScore >= Math.ceil(validNums.length / 2) && validNums.length >= 3;
 
       rows.forEach((r, i) => {
         const key = r.it.item_num;
@@ -1816,30 +1833,10 @@ function jnjRenderPreview() {
           f.seller = true;
         }
 
-        // Lot sequence flag
+        // Lot cluster flag: is this number outside the majority cluster?
         const cur = nums[i];
-        if (cur !== null) {
-          const prev = i > 0 ? nums[i - 1] : null;
-          const next = i < nums.length - 1 ? nums[i + 1] : null;
-          const diffPrev = prev !== null ? Math.abs(cur - prev) : null;
-          const diffNext = next !== null ? Math.abs(cur - next) : null;
-          // Flag when current is far from BOTH neighbors AND neighbors are close.
-          if (diffPrev !== null && diffNext !== null &&
-              diffPrev > 5 && diffNext > 5 &&
-              Math.abs(prev - next) <= 5) {
-            f.lot = true;
-          }
-          // Also flag the FIRST row if it's far from the next row and the next
-          // few form a tight run.
-          if (i === 0 && diffNext !== null && diffNext > 5 && nums.length >= 3) {
-            const n2 = nums[2];
-            if (n2 !== null && Math.abs(next - n2) <= 5) f.lot = true;
-          }
-          // And symmetrically for the LAST row.
-          if (i === rows.length - 1 && diffPrev !== null && diffPrev > 5 && nums.length >= 3) {
-            const p2 = nums[i - 2];
-            if (p2 !== null && Math.abs(prev - p2) <= 5) f.lot = true;
-          }
+        if (cur !== null && isMajorityAnchor && Math.abs(cur - anchor) > CLUSTER_RADIUS) {
+          f.lot = true;
         }
       });
     });
@@ -1856,7 +1853,35 @@ function jnjRenderPreview() {
 
   // Items list
   jnjItemsList.innerHTML = "";
-  for (const it of jnjState.items) {
+  let _lastRenderedSheet = null;
+  for (let _rIdx = 0; _rIdx < jnjState.items.length; _rIdx++) {
+    const it = jnjState.items[_rIdx];
+    // v25.59: insert a lightweight sheet header the first time we see a new
+    // sheet_index. It shows the boxed seller # and the range of lot numbers,
+    // plus a "Renumber from…" button so Ashley can systematically fix a
+    // whole sheet when the AI misread a digit consistently (e.g. read every
+    // 6 as a 2 — 3062,3063,3064,3065,3066 became 3022,3023,3024,3025,3026).
+    const currentSheetKey = it.sheet_index !== undefined ? it.sheet_index : 0;
+    if (currentSheetKey !== _lastRenderedSheet) {
+      _lastRenderedSheet = currentSheetKey;
+      // Collect this sheet's item numbers.
+      const sheetItems = jnjState.items.filter(x => (x.sheet_index !== undefined ? x.sheet_index : 0) === currentSheetKey);
+      const sheetNums = sheetItems.map(x => parseInt((x.item_num || "").replace(/[^0-9]/g,""), 10)).filter(n => Number.isFinite(n));
+      const minN = sheetNums.length ? Math.min(...sheetNums) : "?";
+      const maxN = sheetNums.length ? Math.max(...sheetNums) : "?";
+      const sellerSample = (sheetItems[0] && sheetItems[0].sheet_seller_num) || "?";
+      const header = document.createElement("div");
+      header.className = "jnj-sheet-header";
+      header.innerHTML = `
+        <div class="jnj-sheet-header-title">
+          Sheet ${currentSheetKey + 1}
+          <span class="jnj-sheet-header-meta">Seller ${escapeHtml(sellerSample)} · Lots ${minN}–${maxN} · ${sheetItems.length} rows</span>
+        </div>
+        <button class="jnj-renumber-btn" data-sheet="${currentSheetKey}" data-first="${minN}" title="Fix systematic misreads by resetting all lot numbers on this sheet in sequence">Renumber from…</button>
+      `;
+      jnjItemsList.appendChild(header);
+    }
+
     const card = document.createElement("div");
     card.className = "jnj-item-card";
     card.dataset.itemNum = it.item_num;
@@ -1972,6 +1997,60 @@ function jnjRenderPreview() {
     jnjUnmatched.classList.remove("drag-over");
     const fname = e.dataTransfer.getData("application/x-jnj-photo");
     jnjMovePhotoTo(fname, null);
+  });
+
+  // v25.59: wire up per-sheet "Renumber from…" buttons. Ashley enters the
+  // correct FIRST lot number for the sheet, and every row on that sheet
+  // gets renumbered sequentially (first, first+1, first+2, …). This fixes
+  // systematic OCR misreads in one action.
+  document.querySelectorAll(".jnj-renumber-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const sheetKey = parseInt(btn.dataset.sheet, 10);
+      const suggested = btn.dataset.first || "";
+      const input = prompt(`Renumber Sheet ${sheetKey + 1}\n\nWhat is the FIRST lot number on this sheet? (I'll number the rest in sequence.)`, suggested);
+      if (!input) return;
+      const digitsOnly = input.replace(/[^0-9]/g, "");
+      const firstNum = parseInt(digitsOnly, 10);
+      if (!Number.isFinite(firstNum)) {
+        alert("Please enter a number.");
+        return;
+      }
+      // Preserve any letter prefix the user typed (like G6182 vs 6182).
+      const prefixMatch = input.match(/^([A-Za-z]+)/);
+      const prefix = prefixMatch ? prefixMatch[1].toUpperCase() : "";
+      // Also grab suffix letters after all digits (rare, like 10686FV)
+      const suffixMatch = input.match(/^[A-Za-z]*\d+([A-Za-z]+)$/);
+      const suffix = suffixMatch ? suffixMatch[1].toUpperCase() : "";
+
+      // Build the mapping and rewrite item_num on every row of this sheet.
+      // We also have to rewrite jnjState.itemPhotos keys because those are
+      // indexed by item_num, and jnjState.photos[*].item_num_match too.
+      const affected = jnjState.items.filter(x => (x.sheet_index !== undefined ? x.sheet_index : 0) === sheetKey);
+      const rename = new Map(); // oldItemNum -> newItemNum
+      affected.forEach((it, i) => {
+        const newNum = `${prefix}${firstNum + i}${suffix}`;
+        if (it.item_num !== newNum) rename.set(it.item_num, newNum);
+        it.item_num = newNum;
+      });
+      // Cascade into itemPhotos map.
+      rename.forEach((newKey, oldKey) => {
+        if (jnjState.itemPhotos && jnjState.itemPhotos[oldKey]) {
+          jnjState.itemPhotos[newKey] = jnjState.itemPhotos[oldKey];
+          delete jnjState.itemPhotos[oldKey];
+        }
+      });
+      // Cascade into photos map.
+      if (jnjState.photos) {
+        jnjState.photos.forEach(p => {
+          if (p && rename.has(p.item_num_match)) {
+            p.item_num_match = rename.get(p.item_num_match);
+          }
+        });
+      }
+      jnjLog("RENUMBER", `sheet=${sheetKey + 1} first=${prefix}${firstNum}${suffix} affected=${affected.length}`);
+      jnjRenderPreview();
+      toast(`Renumbered ${affected.length} rows on Sheet ${sheetKey + 1}.`);
+    });
   });
 
   // Wire up all thumbs (drag handlers)
