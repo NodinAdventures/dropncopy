@@ -382,26 +382,53 @@ MAX_CONCURRENT = 8
 async def transcribe_image(image_bytes: bytes, media_type: str) -> str:
     b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
     data_url = f"data:{media_type};base64,{b64}"
-    resp = await client.chat.completions.create(
-        model="gpt-4o",
-        max_tokens=8000,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": data_url, "detail": "high"},
-                    },
-                    {
-                        "type": "text",
-                        "text": "Transcribe all text on this page. Output only the transcription.",
-                    },
-                ],
-            },
-        ],
-    )
+    # v25.61: upgraded from gpt-4o to gpt-5 for the sheet transcription.
+    # gpt-4o was reading Dave's cursive 6 as a 2 (3062 -> 3022) on the
+    # J&J intake sheets. gpt-5 vision is materially better at handwriting.
+    # If gpt-5 is unavailable in the account, we fall back to gpt-4o.
+    try:
+        resp = await client.chat.completions.create(
+            model="gpt-5",
+            max_completion_tokens=8000,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": data_url, "detail": "high"},
+                        },
+                        {
+                            "type": "text",
+                            "text": "Transcribe all text on this page. Output only the transcription. Pay special attention to the leftmost column of numbers — those are the item / lot numbers. On this seller's sheets a handwritten 6 has a loopy closed top that can look like a 2; if the number is part of a sequential run (like 3062, 3063, 3064, 3065, 3066), keep it in sequence. Do NOT reset the tens digit mid-run.",
+                        },
+                    ],
+                },
+            ],
+        )
+    except Exception as e:
+        print(f"gpt-5 transcribe failed, falling back to gpt-4o: {type(e).__name__}: {e}", flush=True)
+        resp = await client.chat.completions.create(
+            model="gpt-4o",
+            max_tokens=8000,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": data_url, "detail": "high"},
+                        },
+                        {
+                            "type": "text",
+                            "text": "Transcribe all text on this page. Output only the transcription.",
+                        },
+                    ],
+                },
+            ],
+        )
     raw = (resp.choices[0].message.content or "").strip()
     return sanitize_transcript(raw)
 
