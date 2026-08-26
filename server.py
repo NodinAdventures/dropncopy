@@ -880,11 +880,15 @@ JNJ_CSV_COLUMNS = [
     "image_6", "image_7", "image_8", "image_9", "image_10",
     "image_11", "image_12", "image_13", "image_14", "image_15",
     "image_16", "image_17", "image_18", "image_19", "image_20",
-    # v25.32: three separate ID fields per Ashley's rule — do not glue them.
-    # cf_SellerID   = seller's ID from the boxed number at top of sheet (AA3102)
-    # cf_LotNumber  = left column on the sheet (3022, 3023, ...) — the lot #
-    # cf_Location   = right column on the sheet (38B, 37B, ...) — storage bin
-    "cf_SellerID", "cf_LotNumber", "cf_Location",
+    # v25.51: J&J's importer expects EXACTLY 50 columns (A-AX in their
+    # sample sheet). v25.32 added cf_LotNumber + cf_Location as extra
+    # columns, pushing total to 52 — that overflowed their VBScript
+    # column array and crashed with 'Subscript out of range: iCF_ColumnCount'
+    # at process_admin_importitems.asp line 798.
+    #
+    # All three IDs are still preserved in the Description field, so
+    # nothing is lost — they just live in one place instead of three.
+    "cf_SellerID",
 ]
 
 # Default field values matching JnJ's sample CSV (April 16 Q Sale).
@@ -1050,13 +1054,16 @@ def build_jnj_csv_row(item_num: str, lot_code: str, description: str,
         seller_number = str(seller_seq)
     row["cf_SellerID"] = f"AA{seller_number}"
 
-    # v25.32: lot number and location kept SEPARATE. No gluing.
-    row["cf_LotNumber"] = item_num or ""
-    row["cf_Location"] = lot_code or ""
+    # v25.51: cf_LotNumber / cf_Location were dropped — J&J's importer
+    # expects EXACTLY 50 columns and crashed with 'Subscript out of range:
+    # iCF_ColumnCount' when we included them. The lot number and location
+    # are still preserved in the Description field just below (all three
+    # IDs live there), which is what actually shows on the live listing
+    # anyway.
 
     # v25.32: stamp all three IDs into the Description so they're readable
-    # on the live J&J listing even if the importer ignores cf_LotNumber /
-    # cf_Location. Format keeps them visually separated (no gluing).
+    # on the live J&J listing — this is Ashley's rule (Seller | Lot |
+    # Location) with no gluing.
     id_stamp_parts = [f"Seller: AA{seller_number}"]
     if item_num:
         id_stamp_parts.append(f"Lot: {item_num}")
