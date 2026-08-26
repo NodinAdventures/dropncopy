@@ -1024,14 +1024,28 @@ def build_jnj_csv_row(item_num: str, lot_code: str, description: str,
                        parsed into `lot_code` by our OCR (misnamed for
                        historical reasons; the variable is the location).
 
-    Title is JUST the description now — no more `3022A38B` glued prefix.
-    Description also stamps all three IDs at the top so they're visible on
-    the listing even if J&J's importer ignores the custom columns.
+    v25.53 — Title format restored to yesterday's glued style per
+    Ashley's Aug 26 correction ("put them together like yesterday"):
+        '{item_num}{lot_code} {description}'
+        e.g. '5448J5A 10 ASSORTED GUMMIES'
+        e.g. '1496J30B USED PROSPORT ERGOMASTER BIKE'
+    If lot_code is missing, we just drop it and leave item_num + description.
+
+    The "do not put them together" rule from v25.32 still applies to the
+    Description field (stamped with `Seller: ... | Lot: ... | Location: ...`
+    on its own line) and to the cf_SellerID custom field. Title is a
+    separate case where staff need the IDs glued for quick visual scan
+    on J&J's listings page.
 
     Title cap: 60 chars per JnJ spec (Admin CSV Help column D).
     """
-    # v25.32: Title is now the plain description. J&J shows it on the listing.
-    title = description
+    # v25.53: glued title — restores yesterday's working format.
+    if item_num and lot_code:
+        title = f"{item_num}{lot_code} {description}"
+    elif item_num:
+        title = f"{item_num} {description}"
+    else:
+        title = description
     if len(title) > 60:
         title = title[:60].rstrip()
 
