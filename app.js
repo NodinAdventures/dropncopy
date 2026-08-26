@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-26-gpt5-v25.61";
+const BUILD_ID = "2026-08-26-renumber-order-v25.62";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v25.61 boot. BUILD_ID:", "2026-08-26-gpt5-v25.61");
+jnjLog("BOOT", "v25.62 boot. BUILD_ID:", "2026-08-26-renumber-order-v25.62");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -1108,7 +1108,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v25.61 · ${BUILD_ID}`;
+  badge.textContent = `v25.62 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
@@ -2022,32 +2022,71 @@ function jnjRenderPreview() {
       const suffixMatch = input.match(/^[A-Za-z]*\d+([A-Za-z]+)$/);
       const suffix = suffixMatch ? suffixMatch[1].toUpperCase() : "";
 
-      // Build the mapping and rewrite item_num on every row of this sheet.
-      // We also have to rewrite jnjState.itemPhotos keys because those are
-      // indexed by item_num, and jnjState.photos[*].item_num_match too.
+      // v25.62: SNAPSHOT + REBUILD approach. Instead of mutating in place
+      // (which reorders itemPhotos when we delete+re-add keys, and can
+      // create key collisions if two rows swap numbers), we:
+      //   1. snapshot each affected item's OLD photo list before mutating
+      //   2. mutate item_num on the items in place
+      //   3. rebuild jnjState.itemPhotos from scratch in items[] order,
+      //      using each item's NEW item_num as the key
+      //   4. update photos[*].item_num_match by matching filename to the
+      //      item that owns it in the new mapping
       const affected = jnjState.items.filter(x => (x.sheet_index !== undefined ? x.sheet_index : 0) === sheetKey);
-      const rename = new Map(); // oldItemNum -> newItemNum
+
+      // Snapshot: for each affected item, remember what photo filenames it had.
+      const snapshotByOldItem = new Map(); // oldItemNum -> [filenames]
+      affected.forEach(it => {
+        const list = (jnjState.itemPhotos && jnjState.itemPhotos[it.item_num]) || [];
+        snapshotByOldItem.set(it.item_num, list.slice());
+      });
+
+      // Rename table so we can log what happened.
+      const rename = new Map();
       affected.forEach((it, i) => {
         const newNum = `${prefix}${firstNum + i}${suffix}`;
         if (it.item_num !== newNum) rename.set(it.item_num, newNum);
-        it.item_num = newNum;
       });
-      // Cascade into itemPhotos map.
-      rename.forEach((newKey, oldKey) => {
-        if (jnjState.itemPhotos && jnjState.itemPhotos[oldKey]) {
-          jnjState.itemPhotos[newKey] = jnjState.itemPhotos[oldKey];
-          delete jnjState.itemPhotos[oldKey];
+
+      // Now mutate item_num for the affected rows. We save each old key so we
+      // can retrieve the snapshot afterward.
+      const oldNums = affected.map(it => it.item_num);
+      affected.forEach((it, i) => {
+        it.item_num = `${prefix}${firstNum + i}${suffix}`;
+      });
+
+      // REBUILD itemPhotos from scratch in items[] order so downstream
+      // FormData iteration matches item iteration. Also guarantees the map's
+      // iteration order stays parallel to jnjState.items.
+      const newItemPhotos = {};
+      jnjState.items.forEach((it, i) => {
+        // Find the old item_num for THIS row (by index in the affected sublist).
+        const affectedIdx = affected.indexOf(it);
+        let list;
+        if (affectedIdx >= 0) {
+          // This row was renamed — look up its photos by the OLD number.
+          const oldKey = oldNums[affectedIdx];
+          list = snapshotByOldItem.get(oldKey) || [];
+        } else {
+          // Row from another sheet — keep its existing photo list.
+          list = (jnjState.itemPhotos && jnjState.itemPhotos[it.item_num]) || [];
         }
+        newItemPhotos[it.item_num] = list.slice();
       });
-      // Cascade into photos map.
+      jnjState.itemPhotos = newItemPhotos;
+
+      // Update photos[*].item_num_match: any filename referenced by a
+      // renamed key must now point at the NEW key. Do this by walking the
+      // rebuilt itemPhotos and setting every photo's item_num_match to its
+      // owning item.
       if (jnjState.photos) {
-        jnjState.photos.forEach(p => {
-          if (p && rename.has(p.item_num_match)) {
-            p.item_num_match = rename.get(p.item_num_match);
-          }
+        Object.entries(jnjState.itemPhotos).forEach(([itemNum, fnames]) => {
+          fnames.forEach(fname => {
+            const info = jnjState.photos.get(fname);
+            if (info) info.item_num_match = itemNum;
+          });
         });
       }
-      jnjLog("RENUMBER", `sheet=${sheetKey + 1} first=${prefix}${firstNum}${suffix} affected=${affected.length}`);
+      jnjLog("RENUMBER", `sheet=${sheetKey + 1} first=${prefix}${firstNum}${suffix} affected=${affected.length} rename=${JSON.stringify([...rename])}`);
       jnjRenderPreview();
       toast(`Renumbered ${affected.length} rows on Sheet ${sheetKey + 1}.`);
     });
@@ -2195,9 +2234,17 @@ async function jnjDownloadZip() {
   jnjDownloadBtn.textContent = "Building zip…";
 
   try {
-    // Build photo_map (filename → item_num) from current state
+    // v25.62: build photo_map by walking jnjState.items IN ORDER — not by
+    // Object.entries(itemPhotos), which may be out of order after edits or
+    // renumbers. Order matters because the server-side ZIP builder gives
+    // photos sequential filenames (SEP 001, 002, 003…) in the same order
+    // it iterates items. If the browser sends photos in a different order
+    // than items iterate, the photo filenames in the CSV can end up mapped
+    // to the wrong lot on J&J's website.
     const photoMap = {};
-    for (const [itemNum, fnames] of Object.entries(jnjState.itemPhotos)) {
+    const orderedItemNums = jnjState.items.map(it => it.item_num);
+    for (const itemNum of orderedItemNums) {
+      const fnames = jnjState.itemPhotos[itemNum] || [];
       for (const fname of fnames) photoMap[fname] = itemNum;
     }
 
