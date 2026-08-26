@@ -1023,40 +1023,46 @@ body {
   background: rgba(245, 158, 11, 0.25);
   border-radius: 4px;
 }
-/* v25.59: per-sheet header row with a "Renumber from…" action button */
+/* v25.60: per-sheet header with a prominent "Fix lot #s" action button.
+ * Wraps to two lines on narrow screens so the button is never hidden. */
 .jnj-sheet-header {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 10px 14px;
-  margin: 16px 0 6px;
-  background: rgba(120, 120, 140, 0.10);
-  border: 1px solid rgba(120, 120, 140, 0.25);
-  border-radius: 6px;
-  font-size: 13px;
-  color: var(--text, #ddd);
+  gap: 10px;
+  padding: 12px 16px;
+  margin: 20px 0 8px;
+  background: rgba(255, 200, 90, 0.10);
+  border: 1.5px solid rgba(245, 158, 11, 0.5);
+  border-radius: 8px;
+  font-size: 14px;
+  color: var(--text, #e8e8e8);
 }
 .jnj-sheet-header:first-child { margin-top: 4px; }
-.jnj-sheet-header-title { font-weight: 600; letter-spacing: 0.02em; }
+.jnj-sheet-header-title { font-weight: 700; letter-spacing: 0.02em; flex: 1 1 auto; min-width: 0; }
 .jnj-sheet-header-meta {
   font-weight: 400;
-  opacity: 0.75;
-  margin-left: 8px;
+  opacity: 0.85;
+  margin-left: 6px;
   font-size: 12px;
+  display: inline-block;
 }
 .jnj-renumber-btn {
   background: #f59e0b;
-  color: #1a1a1a;
-  border: none;
-  border-radius: 4px;
-  padding: 6px 12px;
-  font-size: 12px;
-  font-weight: 600;
+  color: #111;
+  border: 2px solid #d97706;
+  border-radius: 6px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 700;
   cursor: pointer;
   white-space: nowrap;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.25);
+  flex: 0 0 auto;
 }
-.jnj-renumber-btn:hover { background: #f7b53a; }
+.jnj-renumber-btn:hover { background: #fbbf24; }
+.jnj-renumber-btn:active { transform: translateY(1px); }
 .jnj-item-num {
   font-family: 'JetBrains Mono', monospace;
   font-weight: 600;
