@@ -202,6 +202,18 @@ There is NO character limit on the line. Include EVERY note the seller wrote for
 Read the item number on the sheet exactly as it is written. Include any letter prefix or suffix that is actually part of the number (like G6182, F1234, 10686FV).
 If the number is 6182, output 6182. If the number is G6182, output G6182. Do not add or remove letters.
 
+*** WHERE THE ITEM NUMBER LIVES ON THE SHEET ***
+The item number is ALWAYS the number in the FAR-LEFT column of the row — the leftmost column of the table, farthest from the description. It is written on the left edge of the row, before the "OFFICE USE" or "Office Use" column, before any circled or boxed codes, and before the description text.
+
+On some sheets the leftmost column has no header at all, or is labeled "Lot" or "Item" or "#". Whatever the label, the item number is the leftmost thing on the row.
+
+Item numbers on ONE sheet are ALMOST ALWAYS SEQUENTIAL by 1 (for example 3060, 3061, 3062, 3063, 3064, 3065, 3066). If you have already read one row's item number, the next row's item number is normally the previous one PLUS 1. Use this to double-check when handwriting is ambiguous: if the previous row was 3062 and the next digit could be a 2 or a 6, it is almost certainly a 3 (3063), not a 3023. Do not report a lot number that is far out of sequence unless the handwriting VERY CLEARLY shows a jump.
+
+Do NOT confuse the item number with:
+  - The SELLER NUMBER in the boxed field at the TOP-RIGHT of the sheet (usually 3–5 digits, e.g. "3186" or "40416"). That is the seller ID for the WHOLE sheet, not any individual row.
+  - The LOT / LOCATION code in the second column ("Office Use" or similar). That is short and usually has a letter (e.g. "40C", "41B", "55A", "79A") — output it as the lot code, NOT as the item number.
+  - Any date, address, or page-number written elsewhere on the form.
+
 === LOT NUMBERS (VERY IMPORTANT — KEEP THEM SEPARATE FROM THE ITEM NUMBER) ===
 After the item number, sheets have a LOT NUMBER in a separate column labeled "OFFICE USE ONLY" or similar. This looks like "18A", "17B", "21C", "F", "Z", "P", "15C", "9B", "2046", "204B", or a letter+digit like "Z 1", "P 3".
 

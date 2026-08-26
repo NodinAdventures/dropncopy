@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-26-clear-full-v25.57";
+const BUILD_ID = "2026-08-26-sanity-flags-v25.58";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v25.57 boot. BUILD_ID:", "2026-08-26-clear-full-v25.57");
+jnjLog("BOOT", "v25.58 boot. BUILD_ID:", "2026-08-26-sanity-flags-v25.58");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -1108,7 +1108,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v25.57 · ${BUILD_ID}`;
+  badge.textContent = `v25.58 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
@@ -1770,12 +1770,100 @@ function jnjRenderPreview() {
   // Restore preference values into fields (only if empty, so we don't clobber user edits)
   jnjRestorePrefs();
 
+  // v25.58: sanity-check lot numbers and seller IDs across each sheet.
+  // Real intake sheets are sequential (e.g. 3060, 3061, 3062, 3063...) and
+  // every row on ONE sheet has the SAME seller number. When the AI misreads
+  // a '6' as a '2' the run breaks (3060, 3021, 3022, 3023) — we flag those
+  // rows so Ashley can catch and edit them BEFORE downloading the ZIP.
+  //
+  // Two flags per item:
+  //   suspicious_lot    - item_num breaks the numeric sequence on this sheet
+  //   suspicious_seller - sheet_seller_num differs from the sheet's majority
+  const _flags = new Map(); // item_num -> {lot: bool, seller: bool}
+  try {
+    const bySheet = new Map();
+    jnjState.items.forEach((it, idx) => {
+      const k = (it.sheet_index !== undefined) ? it.sheet_index : 0;
+      if (!bySheet.has(k)) bySheet.set(k, []);
+      bySheet.get(k).push({ it, idx });
+    });
+    bySheet.forEach(rows => {
+      // Seller sanity: pick the majority seller number for this sheet.
+      const sellerCounts = new Map();
+      rows.forEach(r => {
+        const s = (r.it.sheet_seller_num || "").trim();
+        if (s) sellerCounts.set(s, (sellerCounts.get(s) || 0) + 1);
+      });
+      let majoritySeller = "";
+      let bestCount = 0;
+      sellerCounts.forEach((c, s) => { if (c > bestCount) { bestCount = c; majoritySeller = s; } });
+
+      // Lot sanity: look at numeric item_nums on this sheet.
+      // If a row's number is >5 away from BOTH neighbors AND both neighbors
+      // agree with each other (i.e. neighbors are consistent), flag this row.
+      const nums = rows.map(r => {
+        const n = parseInt((r.it.item_num || "").replace(/[^0-9]/g, ""), 10);
+        return Number.isFinite(n) ? n : null;
+      });
+
+      rows.forEach((r, i) => {
+        const key = r.it.item_num;
+        if (!_flags.has(key)) _flags.set(key, { lot: false, seller: false });
+        const f = _flags.get(key);
+
+        // Seller mismatch flag
+        if (majoritySeller && r.it.sheet_seller_num && r.it.sheet_seller_num.trim() !== majoritySeller) {
+          f.seller = true;
+        }
+
+        // Lot sequence flag
+        const cur = nums[i];
+        if (cur !== null) {
+          const prev = i > 0 ? nums[i - 1] : null;
+          const next = i < nums.length - 1 ? nums[i + 1] : null;
+          const diffPrev = prev !== null ? Math.abs(cur - prev) : null;
+          const diffNext = next !== null ? Math.abs(cur - next) : null;
+          // Flag when current is far from BOTH neighbors AND neighbors are close.
+          if (diffPrev !== null && diffNext !== null &&
+              diffPrev > 5 && diffNext > 5 &&
+              Math.abs(prev - next) <= 5) {
+            f.lot = true;
+          }
+          // Also flag the FIRST row if it's far from the next row and the next
+          // few form a tight run.
+          if (i === 0 && diffNext !== null && diffNext > 5 && nums.length >= 3) {
+            const n2 = nums[2];
+            if (n2 !== null && Math.abs(next - n2) <= 5) f.lot = true;
+          }
+          // And symmetrically for the LAST row.
+          if (i === rows.length - 1 && diffPrev !== null && diffPrev > 5 && nums.length >= 3) {
+            const p2 = nums[i - 2];
+            if (p2 !== null && Math.abs(prev - p2) <= 5) f.lot = true;
+          }
+        }
+      });
+    });
+  } catch (err) {
+    jnjLog("SANITY-CHECK-ERR", err);
+  }
+
+  // Show a warning banner at the top if anything is flagged.
+  let flaggedCount = 0;
+  _flags.forEach(f => { if (f.lot || f.seller) flaggedCount++; });
+  if (flaggedCount > 0) {
+    jnjPreviewSub.textContent += `  ⚠️ ${flaggedCount} row${flaggedCount === 1 ? "" : "s"} may have an OCR misread — look for the yellow highlight.`;
+  }
+
   // Items list
   jnjItemsList.innerHTML = "";
   for (const it of jnjState.items) {
     const card = document.createElement("div");
     card.className = "jnj-item-card";
     card.dataset.itemNum = it.item_num;
+    // v25.58: attach flag classes so CSS can highlight suspicious rows.
+    const flg = _flags.get(it.item_num) || { lot: false, seller: false };
+    if (flg.lot) card.classList.add("jnj-flag-lot");
+    if (flg.seller) card.classList.add("jnj-flag-seller");
 
     // v25.8: lot codes and item numbers are INLINE-EDITABLE. Tap the pill
     // to correct any OCR misread (e.g. "116C" → "4B"). Fixes ride along

@@ -1008,6 +1008,21 @@ body {
   border-color: var(--accent, #4f46e5);
   background: var(--accent-soft, rgba(79, 70, 229, 0.05));
 }
+/* v25.58: highlight rows the client thinks the AI misread — Lot # far
+ * out of sequence with neighbors, OR seller # different from the rest
+ * of the sheet. Yellow border + warning tint so Ashley sees them at a
+ * glance and can tap-edit before download. */
+.jnj-item-card.jnj-flag-lot,
+.jnj-item-card.jnj-flag-seller {
+  border-color: #f59e0b;
+  background: rgba(245, 158, 11, 0.08);
+  box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.35) inset;
+}
+.jnj-item-card.jnj-flag-lot .jnj-item-num,
+.jnj-item-card.jnj-flag-seller .seller-pill {
+  background: rgba(245, 158, 11, 0.25);
+  border-radius: 4px;
+}
 .jnj-item-num {
   font-family: 'JetBrains Mono', monospace;
   font-weight: 600;
