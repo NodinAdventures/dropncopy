@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-26-clean-desc-v25.56";
+const BUILD_ID = "2026-08-26-clear-full-v25.57";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v25.56 boot. BUILD_ID:", "2026-08-26-clean-desc-v25.56");
+jnjLog("BOOT", "v25.57 boot. BUILD_ID:", "2026-08-26-clear-full-v25.57");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -735,6 +735,19 @@ let jnjState = null;
 //   unmatched: [filename, ...]
 
 function jnjResetState() {
+  // v25.57: release object URLs so the browser can free the underlying photo
+  // blobs. Previously a "clear data" wipe left thumbnail URLs pointing at
+  // File objects, and if the next build didn't fully re-populate them, the
+  // preview could render the previous sale's photos next to new items.
+  try {
+    if (jnjState && jnjState.photos && typeof jnjState.photos.forEach === "function") {
+      jnjState.photos.forEach(p => {
+        if (p && p.thumb && typeof p.thumb === "string" && p.thumb.startsWith("blob:")) {
+          try { URL.revokeObjectURL(p.thumb); } catch {}
+        }
+      });
+    }
+  } catch {}
   jnjState = null;
   jnjPreview.classList.add("hidden");
   jnjItemsList.innerHTML = "";
@@ -928,7 +941,17 @@ jnjPhotosInput.addEventListener("change", (e) => {
 });
 
 jnjClearStagedBtn.addEventListener("click", () => {
+  // v25.57: "Clear data" now behaves like a full page reload for sale data.
+  // Previously it only wiped the staged file list — but jnjState (the built
+  // preview) held on to the previous sale's photo Map, so a rebuild after
+  // Clear could pair NEW items with OLD photos. Now we also blow away the
+  // preview state and revoke any thumbnail object URLs.
   jnjStaged = { sheets: [], photos: [] };
+  jnjResetState();
+  // Reset file inputs too so re-picking the same filename doesn't get
+  // silently ignored by the browser.
+  try { jnjSheetInput.value = ""; } catch {}
+  try { jnjPhotosInput.value = ""; } catch {}
   jnjRenderStaged();
 });
 
@@ -1085,7 +1108,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v25.56 · ${BUILD_ID}`;
+  badge.textContent = `v25.57 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
