@@ -2287,13 +2287,23 @@ async def jnj_zip(
     # J&J's working sample used "TEST 001.webp" — 4 chars + number. Long prefixes
     # like "SEPTEMBER 3 ~ J SALE 005.jpg" may hit path-length or character issues
     # in the uploader. Derive a 3-4 letter code from the first meaningful token.
+    #
+    # v25.63: EVERY upload gets a unique timestamp suffix on the prefix so two
+    # sales named similarly ("September 3 Sale" and "September 5 Sale") don't
+    # produce colliding filenames like SEPT 001.jpg / SEPT 002.jpg on J&J's side.
+    # Cause of "old photos still show": J&J's server saves photos by filename
+    # globally; when a new upload has the SAME filenames as a previous one, the
+    # new file overwrites the old one, but stale listings that referenced the
+    # old file now show the WRONG image. Adding a datestamp guarantees uniqueness.
     def _short_prefix(folder: str) -> str:
         toks = [t for t in folder.split() if t and not t.isdigit() and t != "-"]
         if not toks:
             return "IMG"
         first = toks[0].upper()
         return first[:4] if len(first) >= 3 else first
-    photo_prefix = _short_prefix(sale_folder)
+    # Append MMDD-HHMM stamp so each upload's photos are unique on J&J's server.
+    stamp = datetime.utcnow().strftime("%m%d-%H%M")
+    photo_prefix = f"{_short_prefix(sale_folder)}{stamp}"
     # ---------------------------------------------------------------------
 
     # Build the zip in memory
