@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-26-qr-detect-logging-v25.47";
+const BUILD_ID = "2026-08-26-qr-only-v25.48";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v25.47 boot. BUILD_ID:", "2026-08-26-qr-detect-logging-v25.47");
+jnjLog("BOOT", "v25.48 boot. BUILD_ID:", "2026-08-26-qr-only-v25.48");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -1085,7 +1085,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v25.47 · ${BUILD_ID}`;
+  badge.textContent = `v25.48 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
@@ -1497,208 +1497,31 @@ async function jnjHandleFiles(input) {
       }
     }
 
-    // v25.31: score-based top-N divider picking.
-    // Old approach (v25.28-30): server flagged each photo as is_blank based
-    // on hard thresholds. Photos like FILE 13 038 (a real photo of a dark
-    // object) got misclassified because their pixel signature overlaps with
-    // true dividers.
-    //
-    // New approach: server returns a 0-1000 divider_score for every photo.
-    // We know exactly how many dividers should exist (item_count - 1), so
-    // we pick the top N scoring photos as dividers. Self-correcting:
-    // - true dividers score 850-1000 (near-black content area)
-    // - borderline dark item photos score 400-600
-    // - if we detect too many candidates, the borderline ones lose to true
-    //   dividers and get treated as regular photos
-    // - if we detect too few, the next best candidates get pulled in
-    // v25.39: pick dividers PER SHEET/FOLDER instead of globally.
-    //
-    // Ashley found that FILE 13 156 (a perfect-black landscape divider)
-    // was NOT ending up in the dividerSet despite scoring 1000. Why:
-    // we were picking the top 50 dividers across ALL 282 photos globally.
-    // If one sheet's items include several very-dark item photos, they
-    // can crowd out another sheet's real dividers when we only pick 50
-    // total.
-    //
-    // Fix: group photos by folder path (each JnJ upload folder = one
-    // sheet), and for each folder pick top-(itemCount-1) dividers. This
-    // is self-correcting because each folder's item count comes from the
-    // sheet's parsed items and its photos come from the matching upload.
-    function folderKey(filename) {
-      // '2026-08-25 FILE 13/FILE 13 156.JPG' → '2026-08-25 FILE 13'
-      // 'FILE 13 156.JPG' (no folder) → '' (all such photos share one group)
-      const idx = (filename || "").lastIndexOf("/");
-      return idx > 0 ? filename.slice(0, idx) : "";
-    }
-
-    // Bucket photos and items by folder.
-    // Items don't carry a folder; they carry sheet_index. Photos don't carry
-    // sheet_index. We match on ORDER: sheets are processed in upload order,
-    // and photos are grouped by folder in upload order. So sheet_index 0
-    // corresponds to the first unique folder seen, sheet_index 1 to the
-    // second, etc.
-    const foldersInOrder = [];
-    const photosByFolder = new Map();
-    for (let i = 0; i < allPhotoInfos.length; i++) {
-      const fk = folderKey(allPhotoInfos[i].filename);
-      if (!photosByFolder.has(fk)) {
-        photosByFolder.set(fk, []);
-        foldersInOrder.push(fk);
-      }
-      photosByFolder.get(fk).push(i);
-    }
-    // Group items by sheet_index in the order they appear.
-    const sheetIdxsInOrder = [];
-    const itemsBySheet = new Map();
-    for (const it of items) {
-      const si = (typeof it.sheet_index === "number") ? it.sheet_index : 0;
-      if (!itemsBySheet.has(si)) {
-        itemsBySheet.set(si, []);
-        sheetIdxsInOrder.push(si);
-      }
-      itemsBySheet.get(si).push(it);
-    }
-
+    // v25.48: QR-ONLY divider picking. All the old pixel-scoring and
+    // AI-classification logic has been retired — dividers are declared
+    // EXCLUSIVELY by the printed DROPNCOPY-DIVIDER QR card. If Dave
+    // doesn't shoot a card between two items, they collapse into one.
+    // If he shoots too many cards, all of them are treated as dividers.
+    // This is exactly the behavior Ashley asked for: no guesswork, no
+    // false positives from dark items, no fighting with faint watermarks.
     const dividerSet = new Set();
-    // v25.45: QR-code divider cards are AUTHORITATIVE. If a photo has the
-    // printed DROPNCOPY-DIVIDER card in it, we KNOW 100% it's a divider —
-    // no scoring, no thresholds, no AI. Add these to dividerSet up front,
-    // BEFORE the score-based competition. They don't count against any
-    // sheet's expected-divider limit either — if Dave shoots 20 divider
-    // cards for a 14-item sheet, all 20 are dividers.
-    let qrDividerCount = 0;
     const qrFiles = [];
+    const missingField = [];
     for (let i = 0; i < allPhotoInfos.length; i++) {
       const p = allPhotoInfos[i];
-      // v25.47: log ALL photos' QR flag so we can see server ↔ client mismatch.
-      // Some batches may be failing silently and returning results without
-      // this field; treat missing/undefined as false.
+      if (typeof p.has_divider_qr === "undefined") missingField.push(p);
       if (p.has_divider_qr === true) {
         dividerSet.add(i);
-        qrDividerCount++;
         qrFiles.push(p.filename);
       }
     }
-    jnjLog("QR-DETECT", `qr_dividers=${qrDividerCount}`, `files=[${qrFiles.join(", ")}]`);
-    // Also log photos where the server DIDN'T return the field at all.
-    const missingField = allPhotoInfos.filter(p => typeof p.has_divider_qr === "undefined");
+    jnjLog("QR-DETECT-v48", `qr_dividers=${dividerSet.size}`, `expected~=${Math.max(0, items.length - 1)}`, `files=[${qrFiles.join(", ")}]`);
     if (missingField.length > 0) {
-      jnjLog("QR-DETECT-WARN", `${missingField.length} photos missing has_divider_qr field (probably an old batch response). Files: [${missingField.slice(0, 5).map(p => p.filename).join(", ")}${missingField.length > 5 ? ", ..." : ""}]`);
+      // Backend didn't return has_divider_qr on some responses — either
+      // an older backend build or a batch response missing the field.
+      // These photos will be treated as items, not dividers.
+      jnjLog("QR-DETECT-WARN", `${missingField.length} photos missing has_divider_qr field (backend may be out of date). Files: [${missingField.slice(0, 5).map(p => p.filename).join(", ")}${missingField.length > 5 ? ", ..." : ""}]`);
     }
-
-    // v25.39: with per-sheet picking, borderline candidates only compete
-    // against other photos in the SAME sheet, not against every very-dark
-    // item photo in the whole build. Lower the floor to 200 so faint-
-    // watermark dividers (like FILE 13 156 that Ashley flagged — real
-    // divider with watermark barely visible in file explorer, scoring
-    // around 300) get picked when the sheet needs them.
-    const MIN_DIVIDER_SCORE = 200;
-    const scoreByIdx = new Map();
-    // v25.43: AI prompt was rewritten to only say DIVIDER for pure
-    // uniform-color frames (NOT hands/floors/blurry). So the AI verdict
-    // is now precise enough to trust directly. Big +900 bonus if AI
-    // said divider, no pixel gate needed.
-    for (let i = 0; i < allPhotoInfos.length; i++) {
-      const p = allPhotoInfos[i];
-      const raw = typeof p.divider_score === "number" ? p.divider_score : 0;
-      const aiBonus = p.is_blank ? 900 : 0;
-      scoreByIdx.set(i, raw + aiBonus);
-    }
-
-    // Pair each folder to a sheet by ORDER. If counts don't align (e.g.
-    // user dropped everything into one giant folder), fall back to a
-    // single global bucket.
-    const perGroupLogs = [];
-    let totalRescued = 0;
-    const bucketCount = Math.min(foldersInOrder.length, sheetIdxsInOrder.length);
-    if (bucketCount > 0 && foldersInOrder.length === sheetIdxsInOrder.length) {
-      for (let g = 0; g < bucketCount; g++) {
-        const folder = foldersInOrder[g];
-        const sheetIdx = sheetIdxsInOrder[g];
-        const photoIdxs = photosByFolder.get(folder) || [];
-        const groupItems = itemsBySheet.get(sheetIdx) || [];
-        const expected = Math.max(0, groupItems.length - 1);
-        const scored = photoIdxs
-          .map(idx => ({ idx, score: scoreByIdx.get(idx) || 0 }))
-          .sort((a, b) => b.score - a.score);
-        let picked = 0;
-        for (let i = 0; i < expected && i < scored.length; i++) {
-          if (scored[i].score < MIN_DIVIDER_SCORE) break;
-          dividerSet.add(scored[i].idx);
-          picked++;
-        }
-        // Neighbor rescue within this group only.
-        if (picked < expected) {
-          for (const sp of scored) {
-            if (picked >= expected) break;
-            if (dividerSet.has(sp.idx)) continue;
-            if (sp.score < 100 || sp.score >= MIN_DIVIDER_SCORE) continue;
-            const prevIdx = sp.idx - 1;
-            const nextIdx = sp.idx + 1;
-            const prevScore = prevIdx >= 0 ? (scoreByIdx.get(prevIdx) ?? 999) : -1;
-            const nextScore = nextIdx < allPhotoInfos.length ? (scoreByIdx.get(nextIdx) ?? 999) : -1;
-            const prevOk = (prevScore < 150 || prevScore === -1) && !dividerSet.has(prevIdx);
-            const nextOk = (nextScore < 150 || nextScore === -1) && !dividerSet.has(nextIdx);
-            if (prevOk && nextOk) {
-              dividerSet.add(sp.idx);
-              picked++;
-              totalRescued++;
-            }
-          }
-        }
-        perGroupLogs.push(`sheet${sheetIdx}(${folder||"root"}): items=${groupItems.length} photos=${photoIdxs.length} expected=${expected} picked=${picked} top3=[${scored.slice(0,3).map(s=>s.score.toFixed(0)).join(",")}]`);
-      }
-    } else if (sheetIdxsInOrder.length > 1) {
-      // v25.44: Ashley usually drops ALL photos in one flat folder covering
-      // many sheets. Previously we fell through to a GLOBAL top-N pick,
-      // which lets a very-dark item photo in sheet 6 outrank a real but
-      // faint divider in sheet 13. Instead, split the photo timeline into
-      // contiguous chunks proportional to each sheet's item count, then
-      // pick top-(items-1) dividers PER CHUNK. Guarantees each sheet gets
-      // exactly the dividers it needs, from within its own photos.
-      const totalPhotos = allPhotoInfos.length;
-      const totalItems = items.length;
-      let photoStart = 0;
-      for (let g = 0; g < sheetIdxsInOrder.length; g++) {
-        const sheetIdx = sheetIdxsInOrder[g];
-        const groupItems = itemsBySheet.get(sheetIdx) || [];
-        // Proportional slice: this sheet gets its share of photos by item count.
-        const isLast = g === sheetIdxsInOrder.length - 1;
-        const shareCount = isLast
-          ? (totalPhotos - photoStart)
-          : Math.round((groupItems.length / totalItems) * totalPhotos);
-        const photoEnd = Math.min(photoStart + shareCount, totalPhotos);
-        const chunkIdxs = [];
-        for (let i = photoStart; i < photoEnd; i++) chunkIdxs.push(i);
-        const expected = Math.max(0, groupItems.length - 1);
-        const scored = chunkIdxs
-          .map(idx => ({ idx, score: scoreByIdx.get(idx) || 0 }))
-          .sort((a, b) => b.score - a.score);
-        let picked = 0;
-        for (let i = 0; i < expected && i < scored.length; i++) {
-          if (scored[i].score < MIN_DIVIDER_SCORE) break;
-          dividerSet.add(scored[i].idx);
-          picked++;
-        }
-        perGroupLogs.push(`sheet${sheetIdx}(chunk ${photoStart}-${photoEnd-1}): items=${groupItems.length} photos=${chunkIdxs.length} expected=${expected} picked=${picked} top3=[${scored.slice(0,3).map(s=>`${s.idx}:${s.score.toFixed(0)}`).join(",")}]`);
-        photoStart = photoEnd;
-      }
-      perGroupLogs.push(`PROPORTIONAL v25.44: folders=${foldersInOrder.length} sheets=${sheetIdxsInOrder.length} items=${items.length} picked=${dividerSet.size}/${Math.max(0, items.length - 1)}`);
-    } else {
-      // True fallback: only 1 sheet total, so 1 global chunk anyway.
-      const expectedDividers = Math.max(0, items.length - 1);
-      const scoredPhotos = allPhotoInfos
-        .map((p, idx) => ({ idx, score: scoreByIdx.get(idx) || 0 }))
-        .sort((a, b) => b.score - a.score);
-      for (let i = 0; i < expectedDividers && i < scoredPhotos.length; i++) {
-        if (scoredPhotos[i].score < MIN_DIVIDER_SCORE) break;
-        dividerSet.add(scoredPhotos[i].idx);
-      }
-      perGroupLogs.push(`GLOBAL 1-sheet: folders=${foldersInOrder.length} sheets=${sheetIdxsInOrder.length} items=${items.length} picked=${dividerSet.size}/${expectedDividers}`);
-    }
-
-    jnjLog("DIVIDER-PICK-v45", `total_picked=${dividerSet.size}`, `qr_dividers=${qrDividerCount}`, `expected=${Math.max(0, items.length - 1)}`, `rescued=${totalRescued}`);
-    for (const line of perGroupLogs) jnjLog("DIVIDER-GROUP", line);
 
     // Now the cursor walk uses dividerSet instead of is_blank.
     // v25.6: still collapses consecutive dividers and only advances if the
