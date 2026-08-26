@@ -990,10 +990,14 @@ body {
   gap: 8px;
 }
 .jnj-item-card {
+  /* v25.55: fixed — previously `60px 1fr auto` let the photos row (up to
+   * 20 thumbs × 48px) eat all the horizontal space, squeezing the
+   * description column down to ~20px and character-wrapping every word.
+   * Now the description gets a guaranteed 320px minimum and photos wrap. */
   display: grid;
-  grid-template-columns: 60px 1fr auto;
+  grid-template-columns: 60px minmax(320px, 1fr) minmax(0, 1.4fr);
   gap: 12px;
-  align-items: center;
+  align-items: flex-start;
   padding: 10px 12px;
   background: var(--surface, #fff);
   border: 1px solid var(--border, #e5e7eb);
@@ -1050,6 +1054,7 @@ body {
   margin-right: 6px;
   font-weight: 600;
   letter-spacing: 0.02em;
+  white-space: nowrap; /* v25.55: don't break 'SELLER 5350' into 'SELL / ER' */
 }
 .jnj-item-desc .seller-pill-editable {
   cursor: text;
@@ -1093,6 +1098,7 @@ body {
   gap: 8px;
   flex-wrap: wrap;
   margin-bottom: 4px;
+  min-width: 0;
 }
 .jnj-meta-label {
   font-size: 12px;
@@ -1100,16 +1106,20 @@ body {
   color: #6b7280;
   text-transform: uppercase;
   letter-spacing: 0.03em;
+  white-space: nowrap; /* v25.55: keep 'LOCATION:' on one line */
 }
 .jnj-item-desc-text {
   display: block;
   line-height: 1.4;
 }
 .jnj-item-photos {
+  /* v25.55: wrap thumbs so 20 photos don't push the description off-screen. */
   display: flex;
   gap: 4px;
   align-items: center;
+  flex-wrap: wrap;
   min-height: 48px;
+  min-width: 0;
 }
 .jnj-item-photos.empty {
   padding: 0 12px;
