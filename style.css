@@ -1086,6 +1086,25 @@ body {
   border-radius: 3px;
   padding: 0 2px;
 }
+/* v25.52: meta row above description — SELLER pill + Location label */
+.jnj-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+.jnj-meta-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #6b7280;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.jnj-item-desc-text {
+  display: block;
+  line-height: 1.4;
+}
 .jnj-item-photos {
   display: flex;
   gap: 4px;

@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-26-50col-csv-v25.51";
+const BUILD_ID = "2026-08-26-preview-labels-v25.52";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v25.51 boot. BUILD_ID:", "2026-08-26-50col-csv-v25.51");
+jnjLog("BOOT", "v25.52 boot. BUILD_ID:", "2026-08-26-preview-labels-v25.52");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -1085,7 +1085,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v25.51 · ${BUILD_ID}`;
+  badge.textContent = `v25.52 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
@@ -1737,9 +1737,12 @@ function jnjRenderPreview() {
   jnjPreview.classList.remove("hidden");
 
   // Summary sub-text
+  // v25.52: prepend the current sale name so Ashley can see the week
+  // in the preview without scrolling back to the form field above.
   const total = jnjState.photos.size;
   const matched = total - jnjState.unmatched.length;
-  jnjPreviewSub.textContent = `${jnjState.items.length} items · ${total} photos · ${matched} matched, ${jnjState.unmatched.length} unmatched. Drag photos between items to fix, or click Retry.`;
+  const currentSale = (jnjSaleName && jnjSaleName.value ? jnjSaleName.value.trim() : "") || "(sale name not set)";
+  jnjPreviewSub.textContent = `Sale: ${currentSale} · ${jnjState.items.length} items · ${total} photos · ${matched} matched, ${jnjState.unmatched.length} unmatched. Drag photos between items to fix, or click Retry.`;
 
   // Restore preference values into fields (only if empty, so we don't clobber user edits)
   jnjRestorePrefs();
@@ -1774,9 +1777,19 @@ function jnjRenderPreview() {
       if (label) badgeHtml = `<span class="jnj-match-badge ${kind}">${label}</span>`;
     }
 
+    // v25.52: preview now explicitly labels the three IDs Ashley needs
+    // to see per item: Lot # (item_num), Location (lot_code from right
+    // column of the sheet), and the boxed Seller # from the top of the
+    // sheet. Sale week is one level up in the sale-name form field.
     card.innerHTML = `
-      <div class="jnj-item-num"><span contenteditable="true" spellcheck="false" data-field="item_num" title="Tap to fix item #" style="cursor:text;">${escapeHtml(it.item_num)}</span><small>#${jnjState.items.indexOf(it) + 1}</small></div>
-      <div class="jnj-item-desc">${sellerHtml} ${lotHtml} <span contenteditable="true" spellcheck="false" data-field="description" title="Tap to fix description" style="cursor:text;">${escapeHtml(it.description)}</span></div>
+      <div class="jnj-item-num"><span contenteditable="true" spellcheck="false" data-field="item_num" title="Tap to fix Lot #" style="cursor:text;">${escapeHtml(it.item_num)}</span><small>Lot · #${jnjState.items.indexOf(it) + 1}</small></div>
+      <div class="jnj-item-desc">
+        <div class="jnj-item-meta">
+          ${sellerHtml}
+          <span class="jnj-meta-label">Location:</span> ${lotHtml}
+        </div>
+        <div class="jnj-item-desc-text"><span contenteditable="true" spellcheck="false" data-field="description" title="Tap to fix description" style="cursor:text;">${escapeHtml(it.description)}</span></div>
+      </div>
       <div class="jnj-item-actions">
         ${badgeHtml}
         <div class="jnj-item-photos">${photosHtml}</div>
