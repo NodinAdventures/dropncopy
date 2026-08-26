@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-26-qr-divider-forgiving-v25.46";
+const BUILD_ID = "2026-08-26-qr-detect-logging-v25.47";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v25.46 boot. BUILD_ID:", "2026-08-26-qr-divider-forgiving-v25.46");
+jnjLog("BOOT", "v25.47 boot. BUILD_ID:", "2026-08-26-qr-detect-logging-v25.47");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -1085,7 +1085,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v25.46 · ${BUILD_ID}`;
+  badge.textContent = `v25.47 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
@@ -1567,11 +1567,23 @@ async function jnjHandleFiles(input) {
     // sheet's expected-divider limit either — if Dave shoots 20 divider
     // cards for a 14-item sheet, all 20 are dividers.
     let qrDividerCount = 0;
+    const qrFiles = [];
     for (let i = 0; i < allPhotoInfos.length; i++) {
-      if (allPhotoInfos[i].has_divider_qr === true) {
+      const p = allPhotoInfos[i];
+      // v25.47: log ALL photos' QR flag so we can see server ↔ client mismatch.
+      // Some batches may be failing silently and returning results without
+      // this field; treat missing/undefined as false.
+      if (p.has_divider_qr === true) {
         dividerSet.add(i);
         qrDividerCount++;
+        qrFiles.push(p.filename);
       }
+    }
+    jnjLog("QR-DETECT", `qr_dividers=${qrDividerCount}`, `files=[${qrFiles.join(", ")}]`);
+    // Also log photos where the server DIDN'T return the field at all.
+    const missingField = allPhotoInfos.filter(p => typeof p.has_divider_qr === "undefined");
+    if (missingField.length > 0) {
+      jnjLog("QR-DETECT-WARN", `${missingField.length} photos missing has_divider_qr field (probably an old batch response). Files: [${missingField.slice(0, 5).map(p => p.filename).join(", ")}${missingField.length > 5 ? ", ..." : ""}]`);
     }
 
     // v25.39: with per-sheet picking, borderline candidates only compete
