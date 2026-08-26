@@ -1085,16 +1085,14 @@ def build_jnj_csv_row(item_num: str, lot_code: str, description: str,
     # IDs live there), which is what actually shows on the live listing
     # anyway.
 
-    # v25.32: stamp all three IDs into the Description so they're readable
-    # on the live J&J listing — this is Ashley's rule (Seller | Lot |
-    # Location) with no gluing.
-    id_stamp_parts = [f"Seller: AA{seller_number}"]
-    if item_num:
-        id_stamp_parts.append(f"Lot: {item_num}")
-    if lot_code:
-        id_stamp_parts.append(f"Location: {lot_code}")
-    id_stamp = " | ".join(id_stamp_parts)
-    row["Description"] = f"{id_stamp}\n\n{description}" if description else id_stamp
+    # v25.56: Description is now JUST the item description — no more
+    # 'Seller: ... | Lot: ... | Location: ...' stamp. Ashley confirmed
+    # (Aug 26 IMG_2943) that the stamp was cluttering the live listing:
+    # 'Seller: AA5350 | Lot: 9736 | Location: 15BBLACK RACK DEER RATTLERS'.
+    # The seller ID already shows in J&J's own 'ID Code' field via
+    # cf_SellerID, and Lot + Location are already glued into the Title
+    # (e.g. '9736J15B BLACK RACK DEER RATTLERS'), so nothing is lost.
+    row["Description"] = description or ""
 
     row["StartBid"] = "$1.00 "
     return row
