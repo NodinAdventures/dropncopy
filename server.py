@@ -18,7 +18,7 @@ from typing import List, Tuple, Dict, Any, Optional
 
 import os
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, RateLimitError, APIStatusError, APIConnectionError, APITimeoutError
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.responses import StreamingResponse, FileResponse, Response, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -373,8 +373,72 @@ DO NOT output continuation text on its own line. DO NOT drop continuation text. 
 Do NOT add commentary, do NOT add a "Transcription:" header, do NOT add column labels. Output only the transcribed lines.
 """
 
-# Parallelism cap so we don't overrun API rate limits on huge docs
-MAX_CONCURRENT = 8
+# Parallelism cap so we don't overrun API rate limits on huge docs.
+# v25.65: temporarily lowered 8 -> 3 while account is on OpenAI Tier 1
+# (30k TPM). 8 parallel gpt-4o high-detail calls could burst past 30k
+# tokens in one minute and trigger 429s. Bump back to 8 once the
+# account reaches Tier 2 (450k TPM, ~7 days after the $50 top-up).
+MAX_CONCURRENT = 3
+
+
+async def _openai_with_retry(coro_factory, *, max_attempts: int = 5, op_name: str = "openai"):
+    """Call an OpenAI SDK coroutine with automatic retry on transient errors.
+
+    v25.65: added to make sheet builds resilient to short 429 (rate limit)
+    spikes without changing model, prompt, image bytes, or output. Retries
+    ONLY on transient failures (429, connection/timeout, 5xx). Any real
+    error (4xx other than 429) is re-raised immediately so callers still
+    see genuine problems. Honors the server's Retry-After hint when present,
+    otherwise uses exponential backoff (1s, 2s, 4s, 8s, capped at 15s).
+
+    Pass a zero-arg lambda that creates the coroutine, e.g.:
+        resp = await _openai_with_retry(
+            lambda: client.chat.completions.create(model=..., messages=...),
+            op_name="transcribe_image",
+        )
+    We need a factory (not a coroutine) because a coroutine can only be
+    awaited once; on retry we must build a fresh one.
+    """
+    last_exc: Optional[BaseException] = None
+    for attempt in range(max_attempts):
+        try:
+            return await coro_factory()
+        except RateLimitError as e:
+            last_exc = e
+            # Honor server hint if present (headers.retry-after, in seconds)
+            wait = 0.0
+            try:
+                hdr = getattr(e, "response", None)
+                if hdr is not None:
+                    ra = hdr.headers.get("retry-after") if hasattr(hdr, "headers") else None
+                    if ra:
+                        wait = float(ra)
+            except Exception:
+                wait = 0.0
+            if wait <= 0:
+                wait = min(2 ** attempt, 15)
+            print(f"[{op_name}] 429 rate limit; retry {attempt + 1}/{max_attempts} in {wait:.1f}s")
+            await asyncio.sleep(wait)
+            continue
+        except (APIConnectionError, APITimeoutError) as e:
+            last_exc = e
+            wait = min(2 ** attempt, 15)
+            print(f"[{op_name}] connection/timeout; retry {attempt + 1}/{max_attempts} in {wait:.1f}s")
+            await asyncio.sleep(wait)
+            continue
+        except APIStatusError as e:
+            # Only retry on 5xx server errors; re-raise 4xx immediately.
+            status = getattr(e, "status_code", None)
+            if status is None or status < 500:
+                raise
+            last_exc = e
+            wait = min(2 ** attempt, 15)
+            print(f"[{op_name}] server {status}; retry {attempt + 1}/{max_attempts} in {wait:.1f}s")
+            await asyncio.sleep(wait)
+            continue
+    # Exhausted retries -- surface the last error unchanged
+    assert last_exc is not None
+    raise last_exc
 
 
 # --------------------- helpers ---------------------
@@ -388,7 +452,8 @@ async def transcribe_image(image_bytes: bytes, media_type: str) -> str:
     # is a much better tradeoff: fast reads for the common case, one-button
     # correction for the rare cursive-6 misread. Also using max_tokens=4000
     # (down from 8000) since transcripts are usually well under 2000 tokens.
-    resp = await client.chat.completions.create(
+    resp = await _openai_with_retry(
+        lambda: client.chat.completions.create(
         model="gpt-4o",
         max_tokens=4000,
         messages=[
@@ -407,6 +472,8 @@ async def transcribe_image(image_bytes: bytes, media_type: str) -> str:
                 ],
             },
         ],
+        ),
+        op_name="transcribe_image",
     )
     raw = (resp.choices[0].message.content or "").strip()
     return sanitize_transcript(raw)
@@ -420,7 +487,8 @@ async def is_intake_sheet(image_bytes: bytes, media_type: str) -> bool:
     b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
     data_url = f"data:{media_type};base64,{b64}"
     try:
-        resp = await client.chat.completions.create(
+        resp = await _openai_with_retry(
+            lambda: client.chat.completions.create(
             model="gpt-4o-mini",
             max_tokens=10,
             messages=[
@@ -446,6 +514,8 @@ async def is_intake_sheet(image_bytes: bytes, media_type: str) -> bool:
                     ],
                 },
             ],
+            ),
+            op_name="is_intake_sheet",
         )
         answer = (resp.choices[0].message.content or "").strip().upper()
         return answer.startswith("YES")
@@ -1227,7 +1297,8 @@ async def read_photo_tag(image_bytes: bytes, media_type: str, pre_shrunk: bool =
         # v14: switched from gpt-4o → gpt-4o-mini. Mini is ~4× faster and
         # ~15× cheaper, plenty accurate for reading a 3-digit tag number.
         # Also shortened the prompt — mini burns fewer tokens on short prompts.
-        resp = await client.chat.completions.create(
+        resp = await _openai_with_retry(
+            lambda: client.chat.completions.create(
             model="gpt-4o-mini",
             max_tokens=20,
             messages=[
@@ -1239,6 +1310,8 @@ async def read_photo_tag(image_bytes: bytes, media_type: str, pre_shrunk: bool =
                     ],
                 },
             ],
+            ),
+            op_name="read_photo_tag",
         )
         raw = (resp.choices[0].message.content or "").strip().upper()
         # Simplified for v14 mini prompt: response is either a tag number or NONE.
@@ -1269,10 +1342,13 @@ async def match_photo_by_description(photo_desc: str, items: List[Dict]) -> Opti
         + "\n".join(lines)
     )
     try:
-        resp = await client.chat.completions.create(
+        resp = await _openai_with_retry(
+            lambda: client.chat.completions.create(
             model="gpt-4o-mini",
             max_tokens=30,
             messages=[{"role": "user", "content": prompt}],
+            ),
+            op_name="match_photo_by_description",
         )
         raw = (resp.choices[0].message.content or "").strip().upper()
         if raw == "NONE" or not raw:
@@ -1346,7 +1422,8 @@ async def extract_seller_groups(image_bytes: bytes, media_type: str) -> List[Dic
         return []
     try:
         b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
-        resp = await client.chat.completions.create(
+        resp = await _openai_with_retry(
+            lambda: client.chat.completions.create(
             model="gpt-4o",
             max_tokens=200,
             temperature=0,
@@ -1384,6 +1461,8 @@ async def extract_seller_groups(image_bytes: bytes, media_type: str) -> List[Dic
                 ],
             }],
             response_format={"type": "json_object"},
+            ),
+            op_name="extract_seller_groups",
         )
         raw = (resp.choices[0].message.content or "").strip()
         print(f"extract_seller_groups raw: {raw!r}", flush=True)
@@ -1426,7 +1505,8 @@ async def extract_seller_number(image_bytes: bytes, media_type: str) -> str:
         # handwriting inside marker boxes far more reliably.
         # Prompt is also stricter and shows the model concrete examples of
         # what the boxes look like (e.g. "06", "1894", "2860").
-        resp = await client.chat.completions.create(
+        resp = await _openai_with_retry(
+            lambda: client.chat.completions.create(
             model="gpt-4o",
             max_tokens=15,
             temperature=0,
@@ -1459,6 +1539,8 @@ async def extract_seller_number(image_bytes: bytes, media_type: str) -> str:
                     }},
                 ],
             }],
+            ),
+            op_name="extract_seller_number",
         )
         raw = (resp.choices[0].message.content or "").strip()
         print(f"extract_seller_number raw response: {raw!r}", flush=True)
@@ -1876,7 +1958,8 @@ async def jnj_match_photos(
                 pass
             elif ai_thumb_b64 and _OPENAI_KEY:
                 try:
-                    resp = await client.chat.completions.create(
+                    resp = await _openai_with_retry(
+                        lambda: client.chat.completions.create(
                         model="gpt-4o-mini",
                         messages=[{
                             "role": "user",
@@ -1898,6 +1981,8 @@ async def jnj_match_photos(
                         }],
                         max_tokens=5,
                         temperature=0,
+                        ),
+                        op_name="jnj_match_photos",
                     )
                     answer = (resp.choices[0].message.content or "").strip().lower()
                     # v25.42: prompt now asks the AI to say DIVIDER vs ITEM.
@@ -2083,11 +2168,14 @@ async def jnj_resolve_maybe(
         # v25.5: back to gpt-4o-mini for speed. v25.3's full gpt-4o here was
         # causing the pipeline to hang because every close-up now went
         # through this endpoint AND took several seconds each.
-        resp = await client.chat.completions.create(
+        resp = await _openai_with_retry(
+            lambda: client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": content}],
             max_tokens=5,
             temperature=0,
+            ),
+            op_name="jnj_resolve_maybe",
         )
         answer = (resp.choices[0].message.content or "").strip().lower()
         is_item = not answer.startswith("b")  # blank -> not item
@@ -2132,7 +2220,8 @@ async def jnj_verify_assignment(
     nxt = next_item_desc.strip()[:300]
 
     try:
-        resp = await client.chat.completions.create(
+        resp = await _openai_with_retry(
+            lambda: client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{
                 "role": "user",
@@ -2156,6 +2245,8 @@ async def jnj_verify_assignment(
             }],
             max_tokens=5,
             temperature=0,
+            ),
+            op_name="jnj_verify_assignment",
         )
         answer = (resp.choices[0].message.content or "").strip().upper()
         if answer.startswith("B"):
