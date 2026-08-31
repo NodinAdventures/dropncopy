@@ -243,6 +243,31 @@ If you see two chunks between the item number and the description (like "Z 3" or
 
 The lot number is always in the second column of the sheet, right after the item number column, and BEFORE the description column. Read them from the columns exactly as laid out.
 
+**WHAT A VALID LOT CODE LOOKS LIKE (STRICT):**
+A lot code is SHORT and follows one of these patterns:
+  - 1-2 digits + 1 uppercase letter: 18A, 17B, 21C, 33C, 37G, 35B, 91B, 9B, 15C
+  - A single uppercase letter: F, Z, P, C, Cr ("Cr" is 2 letters, still valid)
+  - A letter + short digit merged: Z3, P16
+  - Plain 3-4 digit numbers with an optional trailing letter: 2046, 204B
+
+A lot code is NEVER an English word. "COBRA", "BRASS", "BOOK", "YARD", "LARGE", "SLEDS", "DIGITAL", "HOODED", "OFFICIAL" are NOT lot codes — they are the first word of the DESCRIPTION.
+
+If the office-use / lot column on a row is BLANK, the row has NO lot code. Output the item number, then a space, then the description starting with whatever word the seller wrote first — even if that word looks like it could be a code (like "COBRA" or "BRASS"). DO NOT grab the first word of the description and pretend it is a lot code.
+
+WRONG (do not do this):
+  Sheet row: "8533  [blank]  Cobra Digital Radar + Laser Detector"
+  Wrong output:   "8533 COBRA DIGITAL RADAR AND LASER DETECTOR"
+     ^^^^ COBRA is NOT a lot code. The row has no lot code because the lot column is blank.
+
+RIGHT:
+  Sheet row: "8533  [blank]  Cobra Digital Radar + Laser Detector"
+  Right output:   "8533 COBRA DIGITAL RADAR AND LASER DETECTOR"
+     (the item number is followed directly by the description; no lot code appears because none was written)
+
+Both outputs above look identical because they ARE identical — the difference is only in the DOWNSTREAM parser's interpretation. Our downstream parser sees a 2-token prefix and treats the second token as a lot code IF and ONLY IF it matches one of the valid lot-code patterns above. "COBRA" does not match any pattern, so it will correctly be treated as description — as long as you don't glue it to something that looks like a code.
+
+So the practical rule is: when the lot column is blank on the paper, just write the item number followed by the seller's description. Do not pause and try to identify a lot code that isn't there.
+
 If a row has NO lot number written (the office-use column is empty for that row), just output the item number and description with no lot code in between.
 
 Read the handwriting VERY carefully. "Grill" and "Quilt" look similar in cursive — use context: "grill cover" makes more sense than "quilt cover" when paired with a mattress. Similarly "Faucet" makes more sense than "Facent".
@@ -1072,7 +1097,21 @@ def parse_item_lines(transcript: str) -> List[Tuple[str, str, str]]:
         lot_code = ""
         if rest:
             tok = rest[0]
-            if 1 <= len(tok) <= 5 and re.fullmatch(r'[A-Z0-9]+', tok):
+            # v25.67: tightened lot-code detection. Previously any 1-5 char
+            # alphanumeric token was treated as a lot code, which grabbed
+            # description words like COBRA, BRASS, HOODED, BOOK when the lot
+            # column on the sheet was blank. Real JnJ lot codes are one of:
+            #   - contains at least one digit (18A, 37G, 2046, Z3, 204B)
+            #   - 1-2 letters only (F, Z, P, C, Cr)
+            # An all-letter token of 3+ chars is a description word, not a code.
+            is_short_letters_only = bool(re.fullmatch(r'[A-Z]{1,2}', tok))
+            has_digit = any(c.isdigit() for c in tok)
+            looks_like_lot_code = (
+                1 <= len(tok) <= 5
+                and bool(re.fullmatch(r'[A-Z0-9]+', tok))
+                and (has_digit or is_short_letters_only)
+            )
+            if looks_like_lot_code:
                 lot_code = tok
                 rest = rest[1:]
         description = " ".join(rest).strip()
