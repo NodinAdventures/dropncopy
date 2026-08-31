@@ -293,29 +293,54 @@ Examples:
 
 NEVER output `8 1 2 X 12` — that's the fraction split into three tokens and is unreadable. ALWAYS keep the fraction as one `N/N` unit like `1/2` or `3/4`.
 
-=== MULTI-LINE DESCRIPTIONS (VERY IMPORTANT) ===
-Sellers often write long descriptions that WRAP onto a second or third line on the sheet. When a line on the sheet does NOT start with a new item number, it is a CONTINUATION of the previous item's description — NOT a separate item.
+=== MULTI-LINE DESCRIPTIONS (VERY IMPORTANT — READ CAREFULLY) ===
+Sellers often write long descriptions that WRAP onto a second, third, or fourth line on the sheet. This is EXTREMELY common on JnJ intake sheets. When a line on the sheet has NO item number and NO lot code in the far-left columns, it is a CONTINUATION of the previous item's description — NOT a separate item.
+
+**HOW TO IDENTIFY A CONTINUATION LINE VISUALLY (this is the key rule):**
+- The far-left OFFICE USE ONLY column is EMPTY for that row (no item number like 8545 or G6182).
+- The lot column right after it is EMPTY too (no lot code like 37G or 18A).
+- The row usually has 'Lot' printed on it (from the form template) but no lot number written next to it.
+- Only the description column has handwriting on that row.
+- The handwriting is a continuation of the words from the row above — like UNOPENED continuing COBRA DIGITAL RADAR + LASER DETECTOR, or SLEDDERS + SKIERS continuing DECORATIVE SLED + BASKET OF X-MAS, or NEW LIKE continuing EVERY READY NICKEL CADMIUM BATTERY CHARGER.
+
+**CRITICAL: NEVER invent an item number for a continuation line.**
+- The sequential-by-1 rule (row N+1 = row N + 1) ONLY applies to rows where an item number was ACTUALLY WRITTEN on the sheet in the far-left column.
+- If the far-left column is BLANK on a row, that row is NOT a new item — it is a continuation of the row above.
+- DO NOT skip a row on the paper. DO NOT number a blank-left-column row just because it is the next in sequence. The seller left the left column blank on purpose — it means same item as above, more description below.
 
 Rules for continuation lines:
-- Read the item number ONCE at the start. Every following line without its own item number belongs to that same item.
+- Read the item number ONCE from the far-left column of a row.
+- Every following row where the far-left column is EMPTY belongs to that same item.
 - MERGE all continuation lines into ONE output line for that item, joined by a single space.
-- Only start a new output line when you see the NEXT item number written on the sheet.
+- Only start a new output line when you see the NEXT item number ACTUALLY WRITTEN in the far-left column on a new row.
 
-Examples:
-  Sheet has:                                    Output:
-  ---------                                     -------
-  G6182  2 mattresses and                       G6182 2 MATTRESSES AND LARGE GRILL COVER WITH ZIPPER
-         large grill cover with zipper
+Examples of correct continuation handling:
 
-  G691   Outdoor Roller Shade Coolaroo          G691 OUTDOOR ROLLER SHADE COOLAROO NEW IN BOX 72 X 72 IN MOCHA COLOR
-         NIB 72x72 in
-         Mocha color
+  Sheet has:                                        Output:
+  ---------                                         -------
+  8533   [blank]  Cobra Digital Radar + Laser       8533 COBRA DIGITAL RADAR AND LASER DETECTOR UNOPENED
+  [blank] [blank] Detector
+  [blank] [blank] Unopened
+  8534   37G      3 American Locks with Keys        8534 37G 3 AMERICAN LOCKS WITH KEYS
 
-  G629   Magnetic strips 54 pieces              G629 MAGNETIC STRIPS 54 PIECES APPROX 1 2 X 10 3 4 FOR CRAFTS
-         approx 1/2 x 10 3/4
-         for crafts
+  8543   36B      Yard Art Noisy Frog + Metal       8543 36B YARD ART NOISY FROG AND METAL CAT CANDLE HOLDER
+  [blank] [blank] Cat Candle
+  [blank] [blank] Holder
+  8544   36A      Decorative Sled + Basket of       8544 36A DECORATIVE SLED AND BASKET OF X-MAS SLEDDERS AND SKIERS
+  [blank] [blank] X-Mas
+  [blank] [blank] Sledders + Skiers
+  8545   1B       Book Heidi 1927                   8545 1B BOOK HEIDI 1927
 
-DO NOT output continuation text on its own line. DO NOT drop continuation text. Everything the seller wrote about that item goes on the SAME output line as the item number.
+  G6182  18A      2 mattresses and                  G6182 18A 2 MATTRESSES AND LARGE GRILL COVER WITH ZIPPER
+  [blank] [blank] large grill cover with zipper
+
+  G691   Z3       Outdoor Roller Shade Coolaroo     G691 Z3 OUTDOOR ROLLER SHADE COOLAROO NEW IN BOX 72 X 72 IN MOCHA COLOR
+  [blank] [blank] NIB 72x72 in
+  [blank] [blank] Mocha color
+
+DO NOT output continuation text on its own line. DO NOT drop continuation text. DO NOT invent an item number for a continuation row. Everything the seller wrote about that item goes on the SAME output line as the item number.
+
+COMMON MISTAKE TO AVOID: Do NOT think 'the previous row was 8544 so the next row must be 8545.' That is only true when the sheet actually shows 8545 written in the far-left column. If the far-left column is blank, the row is a continuation, not the next item.
 
 === ORDER (CRITICAL) ===
 - Output the lines in the EXACT order they appear on the page, top to bottom.

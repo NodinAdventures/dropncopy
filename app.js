@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-26-fast-again-v25.64";
+const BUILD_ID = "2026-08-31-continuation-fix-v25.66";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v25.64 boot. BUILD_ID:", "2026-08-26-fast-again-v25.64");
+jnjLog("BOOT", "v25.66 boot. BUILD_ID:", "2026-08-31-continuation-fix-v25.66");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
