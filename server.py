@@ -493,40 +493,204 @@ async def _openai_with_retry(coro_factory, *, max_attempts: int = 5, op_name: st
 
 # --------------------- helpers ---------------------
 
+def _crop_left_column_zoomed(image_bytes: bytes) -> Optional[bytes]:
+    """v25.68: crop the leftmost 22% of the sheet and zoom it 2x so the
+    item-number column becomes ~44% of the input width at 2x pixel density.
+    Gives the AI a much bigger view of just the digits, which fixes closed-top
+    3-vs-2 misreads and other subtle handwriting ambiguity. Returns PNG bytes,
+    or None if cropping fails (in which case caller skips the second pass).
+    """
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            img = img.convert("RGB")
+            w, h = img.size
+            # Grab a bit past the office-use column so we also see the lot code
+            # for context. Real sheets: item column is ~0-15% of width, lot
+            # column ~15-25%. Crop to 22% to be safe. Skip the top 10% (header)
+            # and bottom 5% (blank rows) to reduce distraction.
+            left = img.crop((0, int(h * 0.10), int(w * 0.22), int(h * 0.95)))
+            # Zoom 2x for the model. Bicubic gives clean digit edges.
+            zoomed = left.resize(
+                (left.size[0] * 2, left.size[1] * 2), Image.BICUBIC
+            )
+            buf = io.BytesIO()
+            zoomed.save(buf, format="PNG", optimize=True)
+            return buf.getvalue()
+    except Exception as e:
+        print(f"[crop_left_column] failed: {e}")
+        return None
+
+
+async def _read_left_column_numbers(image_bytes: bytes) -> List[str]:
+    """v25.68: dedicated second-pass read of just the item-number column
+    at 2x zoom. Returns a list of item numbers in row order, or [] if the
+    call fails. This is the reconciliation source of truth for cases where
+    the full-page transcription misread the tens/hundreds digit.
+    """
+    cropped = _crop_left_column_zoomed(image_bytes)
+    if cropped is None:
+        return []
+    b64 = base64.standard_b64encode(cropped).decode("utf-8")
+    data_url = f"data:image/png;base64,{b64}"
+    try:
+        resp = await _openai_with_retry(
+            lambda: client.chat.completions.create(
+                model="gpt-4o",
+                max_tokens=800,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": data_url, "detail": "high"},
+                            },
+                            {
+                                "type": "text",
+                                "text": (
+                                    "This is the left edge of a handwritten auction intake sheet, zoomed 2x. "
+                                    "Read ONLY the item numbers written in the far-left OFFICE USE ONLY column, "
+                                    "in top-to-bottom order. "
+                                    "These numbers are almost always sequential by 1 (e.g. 8531, 8532, 8533, 8534). "
+                                    "CRITICAL: handwritten 3s often have a closed loopy top that looks like a 2. "
+                                    "If you see a run of numbers where the last digit alternates (like 8521, 8532, 8533, 8534), "
+                                    "the '8521' is almost certainly a misread '8531' - fix it. "
+                                    "Same for 6s that look like 2s (loopy top): if the sequence is 3062, 3023, 3064 you know 3023 is really 3063. "
+                                    "Every filled row on the sheet should have a number. Skip blank rows (rows with only 'Lot' printed but no number written). "
+                                    "Output one number per line, nothing else. No labels, no commentary, no headers. "
+                                    "Include letter prefixes/suffixes if written (G6182, F1234). "
+                                    "If a row's number is truly unreadable, output ILLEGIBLE on its own line."
+                                ),
+                            },
+                        ],
+                    }
+                ],
+            ),
+            op_name="read_left_column",
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        nums = []
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if line == "ILLEGIBLE":
+                nums.append("")
+                continue
+            m = re.match(r"^([A-Z]*\d{2,}[A-Z]*)\b", line.upper())
+            if m:
+                nums.append(m.group(1))
+        return nums
+    except Exception as e:
+        print(f"[read_left_column] failed: {e}")
+        return []
+
+
+def _reconcile_item_numbers(transcript: str, verified_nums: List[str]) -> str:
+    """v25.68: if the second-pass left-column reader gave us a list of item
+    numbers that clearly disagree with the main transcript, replace the
+    transcript's item numbers with the verified ones.
+
+    Only rewrites when we have HIGH confidence:
+    - Same number of rows on both sides (with tolerance of +/-1)
+    - Verified numbers are consistently sequential (each = previous + 1)
+    - Transcript numbers are also sequential but with a fixed offset (like -10)
+
+    In all other cases we leave the transcript alone - better to let the user
+    click "Fix lot #s on this sheet" than to corrupt a partial match.
+    """
+    if not verified_nums:
+        return transcript
+    lines = transcript.splitlines()
+    transcript_items = []
+    for i, line in enumerate(lines):
+        if line.startswith("---") and line.endswith("---"):
+            continue
+        m = ITEM_NUMBER_RE.match(line.strip())
+        if m:
+            transcript_items.append((i, m.group(1)))
+    if not transcript_items or len(verified_nums) < 2:
+        return transcript
+
+    def to_int(s):
+        digits = re.sub(r"[^0-9]", "", s)
+        return int(digits) if digits.isdigit() and len(digits) >= 3 else None
+
+    tr_ints = [to_int(n) for _, n in transcript_items]
+    vf_ints = [to_int(n) for n in verified_nums if n]
+    if any(x is None for x in tr_ints) or any(x is None for x in vf_ints):
+        return transcript
+
+    def is_sequential(ints):
+        return all(ints[i + 1] == ints[i] + 1 for i in range(len(ints) - 1))
+
+    if not is_sequential(tr_ints) or not is_sequential(vf_ints):
+        return transcript
+    if abs(len(tr_ints) - len(vf_ints)) > 1:
+        return transcript
+    offset = vf_ints[0] - tr_ints[0]
+    if offset == 0:
+        return transcript
+    if abs(offset) > 100:
+        return transcript
+    print(f"[reconcile] shifting transcript item numbers by {offset:+d} "
+          f"(transcript first={tr_ints[0]}, verified first={vf_ints[0]})")
+    new_lines = list(lines)
+    for (line_idx, old_num), old_int in zip(transcript_items, tr_ints):
+        new_int = old_int + offset
+        prefix = re.match(r"^([A-Z]*)", old_num).group(1)
+        suffix_m = re.search(r"([A-Z]*)$", old_num)
+        suffix = suffix_m.group(1) if suffix_m else ""
+        new_num = f"{prefix}{new_int}{suffix}"
+        line = new_lines[line_idx]
+        new_lines[line_idx] = re.sub(
+            r"^([A-Z]*\d{3,}[A-Z]*)",
+            new_num,
+            line.strip(),
+            count=1,
+        )
+    return "\n".join(new_lines)
+
+
 async def transcribe_image(image_bytes: bytes, media_type: str) -> str:
     b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
     data_url = f"data:{media_type};base64,{b64}"
-    # v25.64: back to gpt-4o as the primary. gpt-5 vision was 4-8x slower
-    # per sheet and Ashley reported the build was taking forever. gpt-4o
-    # with a strong prompt + Ashley's one-tap "Fix lot #s" button in the UI
-    # is a much better tradeoff: fast reads for the common case, one-button
-    # correction for the rare cursive-6 misread. Also using max_tokens=4000
-    # (down from 8000) since transcripts are usually well under 2000 tokens.
-    resp = await _openai_with_retry(
+    # v25.68: run the main transcription and the left-column-only second pass
+    # in parallel, then reconcile. The second pass reads a 2x-zoomed crop of
+    # just the item-number column, which the model reads much more reliably
+    # (fixes 3-with-closed-top-looks-like-2 handwriting misreads that were
+    # cascading through the whole sheet via the sequential-by-1 rule).
+    main_task = _openai_with_retry(
         lambda: client.chat.completions.create(
-        model="gpt-4o",
-        max_tokens=4000,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": data_url, "detail": "high"},
-                    },
-                    {
-                        "type": "text",
-                        "text": "Transcribe all text on this page. Output only the transcription. Pay special attention to the leftmost column of numbers — those are the item / lot numbers. On handwritten sheets a 6 can have a loopy closed top that looks like a 2; if the number is part of a sequential run (like 3062, 3063, 3064, 3065, 3066), keep it in sequence and do NOT reset the tens digit mid-run.",
-                    },
-                ],
-            },
-        ],
+            model="gpt-4o",
+            max_tokens=4000,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": data_url, "detail": "high"},
+                        },
+                        {
+                            "type": "text",
+                            "text": "Transcribe all text on this page. Output only the transcription. Pay special attention to the leftmost column of numbers - those are the item / lot numbers. On handwritten sheets a 6 can have a loopy closed top that looks like a 2; a 3 can have a flat closed top that ALSO looks like a 2. If the number is part of a sequential run (like 3062, 3063, 3064 or 8531, 8532, 8533), keep it in sequence and do NOT reset the tens digit mid-run. When in doubt on the FIRST row of a sheet, look at row 2 and work backwards: if row 2 is clearly 8532 then row 1 must be 8531, not 8521.",
+                        },
+                    ],
+                },
+            ],
         ),
         op_name="transcribe_image",
     )
-    raw = (resp.choices[0].message.content or "").strip()
-    return sanitize_transcript(raw)
+    left_task = _read_left_column_numbers(image_bytes)
+    main_resp, verified_nums = await asyncio.gather(main_task, left_task)
+    raw = (main_resp.choices[0].message.content or "").strip()
+    sanitized = sanitize_transcript(raw)
+    reconciled = _reconcile_item_numbers(sanitized, verified_nums)
+    return reconciled
+
+
 
 
 async def is_intake_sheet(image_bytes: bytes, media_type: str) -> bool:
