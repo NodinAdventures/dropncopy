@@ -556,6 +556,8 @@ async def _read_left_column_numbers(image_bytes: bytes) -> List[str]:
                                     "If you see a run of numbers where the last digit alternates (like 8521, 8532, 8533, 8534), "
                                     "the '8521' is almost certainly a misread '8531' - fix it. "
                                     "Same for 6s that look like 2s (loopy top): if the sequence is 3062, 3023, 3064 you know 3023 is really 3063. "
+                                    "CRITICAL 0-vs-1: handwritten 0s written tightly can look like 1s. If you see 1001, 1001, 1002, 1003 (duplicate first row), the first row is almost certainly 1000. If row 2 equals what you read for row 1, row 1 is actually one less. "
+                                    "NEVER output duplicate consecutive numbers - if two rows in a row have the same number, the FIRST one is one less. "
                                     "Every filled row on the sheet should have a number. Skip blank rows (rows with only 'Lot' printed but no number written). "
                                     "Output one number per line, nothing else. No labels, no commentary, no headers. "
                                     "Include letter prefixes/suffixes if written (G6182, F1234). "
@@ -675,7 +677,7 @@ async def transcribe_image(image_bytes: bytes, media_type: str) -> str:
                         },
                         {
                             "type": "text",
-                            "text": "Transcribe all text on this page. Output only the transcription. Pay special attention to the leftmost column of numbers - those are the item / lot numbers. On handwritten sheets a 6 can have a loopy closed top that looks like a 2; a 3 can have a flat closed top that ALSO looks like a 2. If the number is part of a sequential run (like 3062, 3063, 3064 or 8531, 8532, 8533), keep it in sequence and do NOT reset the tens digit mid-run. When in doubt on the FIRST row of a sheet, look at row 2 and work backwards: if row 2 is clearly 8532 then row 1 must be 8531, not 8521.",
+                            "text": "Transcribe all text on this page. Output only the transcription. Pay special attention to the leftmost column of numbers - those are the item / lot numbers. On handwritten sheets: a 6 can have a loopy closed top that looks like a 2; a 3 can have a flat closed top that ALSO looks like a 2; a 0 can look like a 1 when written tightly; a 4 can look like a 9 when the top is closed. If the number is part of a sequential run (like 3062, 3063, 3064 or 1000, 1001, 1002), keep it in sequence and do NOT reset the tens/hundreds/thousands digit mid-run. When in doubt on the FIRST row of a sheet, LOOK AT ROW 2 AND WORK BACKWARDS: if row 2 is clearly 1001 then row 1 must be 1000, not 1001; if row 2 is 8532 then row 1 must be 8531, not 8521. NEVER duplicate an item number - if the second row's number is what you think the first row is, you have misread the first row and it should be one less.",
                         },
                     ],
                 },
