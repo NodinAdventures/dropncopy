@@ -1169,11 +1169,12 @@ body {
 }
 .jnj-item-photos {
   /* v25.55: wrap thumbs so 20 photos don't push the description off-screen. */
+  /* v25.71: bumped thumb size 48 -> 72 for easier review. */
   display: flex;
-  gap: 4px;
+  gap: 6px;
   align-items: center;
   flex-wrap: wrap;
-  min-height: 48px;
+  min-height: 72px;
   min-width: 0;
 }
 .jnj-item-photos.empty {
@@ -1184,9 +1185,9 @@ body {
 }
 .jnj-photo-thumb {
   position: relative;
-  width: 48px;
-  height: 48px;
-  border-radius: 6px;
+  width: 72px;
+  height: 72px;
+  border-radius: 8px;
   overflow: hidden;
   cursor: grab;
   border: 2px solid transparent;
