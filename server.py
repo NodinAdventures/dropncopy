@@ -588,6 +588,55 @@ async def _read_left_column_numbers(image_bytes: bytes) -> List[str]:
         return []
 
 
+def _fix_first_row_duplicate(transcript: str) -> str:
+    """v25.70: deterministic fix for the specific 0-vs-1 first-row misread.
+
+    If rows 2..N are perfectly sequential by 1, and row 1 is >= row 2
+    (which is impossible in a real sequential run - row 1 should be row 2 - 1),
+    force row 1 to be row 2 - 1. Catches the common handwritten-0 misread
+    where row 1 (actually 1000) gets read as 1001 and matches row 2.
+    """
+    lines = transcript.splitlines()
+    items = []
+    for i, line in enumerate(lines):
+        if line.startswith("---") and line.endswith("---"):
+            continue
+        m = ITEM_NUMBER_RE.match(line.strip())
+        if m:
+            num = m.group(1)
+            digits = re.sub(r"[^0-9]", "", num)
+            if not digits or len(digits) < 3:
+                continue
+            prefix = re.match(r"^([A-Z]*)", num).group(1)
+            suffix_m = re.search(r"([A-Z]*)$", num)
+            suffix = suffix_m.group(1) if suffix_m else ""
+            items.append((i, num, int(digits), prefix, suffix))
+    if len(items) < 3:
+        return transcript
+    tail_sequential = all(
+        items[k + 1][2] == items[k][2] + 1 for k in range(1, len(items) - 1)
+    )
+    if not tail_sequential:
+        return transcript
+    row1_int = items[0][2]
+    row2_int = items[1][2]
+    if row1_int < row2_int:
+        return transcript
+    new_row1_int = row2_int - 1
+    line_idx, old_num, _, prefix, suffix = items[0]
+    new_num = f"{prefix}{new_row1_int}{suffix}"
+    print(f"[fix_first_row_duplicate] row 1 '{old_num}' -> '{new_num}' "
+          f"(row 2 = {row2_int}, so row 1 must be {new_row1_int})")
+    new_lines = list(lines)
+    new_lines[line_idx] = re.sub(
+        r"^([A-Z]*\d{3,}[A-Z]*)",
+        new_num,
+        new_lines[line_idx].strip(),
+        count=1,
+    )
+    return "\n".join(new_lines)
+
+
 def _reconcile_item_numbers(transcript: str, verified_nums: List[str]) -> str:
     """v25.68: if the second-pass left-column reader gave us a list of item
     numbers that clearly disagree with the main transcript, replace the
@@ -689,7 +738,10 @@ async def transcribe_image(image_bytes: bytes, media_type: str) -> str:
     main_resp, verified_nums = await asyncio.gather(main_task, left_task)
     raw = (main_resp.choices[0].message.content or "").strip()
     sanitized = sanitize_transcript(raw)
-    reconciled = _reconcile_item_numbers(sanitized, verified_nums)
+    # v25.70: deterministic first-row duplicate fix runs BEFORE reconcile so
+    # the reconcile logic sees a clean sequential run.
+    fixed = _fix_first_row_duplicate(sanitized)
+    reconciled = _reconcile_item_numbers(fixed, verified_nums)
     return reconciled
 
 
