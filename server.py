@@ -2710,17 +2710,177 @@ async def jnj_zip(
 
         writer.writerow(row)
 
-    # Write the zip
-    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("items.csv", csv_buf.getvalue().encode("utf-8-sig"))
-        for name, data in photo_files:
-            zf.writestr(name, data)
+    # ------------------------------------------------------------------
+    # v25.70: AUTO-SPLIT ZIP if it exceeds jnjonlineauction.com's upload
+    # limit. Their IIS server returns HTTP 413.1 (Request Entity Too
+    # Large) when a single upload is over ~28.6 MB (IIS 7+ default of
+    # maxAllowedContentLength = 30,000,000 bytes). We target 25 MB per
+    # part to leave headroom for multipart HTTP overhead.
+    #
+    # Strategy:
+    #   1. Build the full CSV once (all rows).
+    #   2. Estimate the total zip size (CSV + all photos, deflated).
+    #   3. If it fits under threshold → return single zip like before.
+    #   4. If it doesn't → pack items sequentially into parts. Each part
+    #      contains its OWN items.csv (only the rows for THAT part's
+    #      items) plus THAT part's photos. Each part is a valid
+    #      standalone upload to jnjonlineauction.com.
+    #   5. Bundle the parts into ONE wrapper zip named
+    #      "...-SPLIT-into-Nparts.zip" that Dave extracts locally to get
+    #      N ready-to-upload zips. Include a README.txt with clear
+    #      instructions.
+    # ------------------------------------------------------------------
+    SPLIT_THRESHOLD_BYTES = 25 * 1024 * 1024  # 25 MB per part
 
-    zip_bytes = zip_buf.getvalue()
+    # Rebuild per-item rows keyed by item_num so we can regroup them
+    # into parts. We already wrote rows into csv_buf above in item
+    # order; but we also need the raw row dicts to re-emit into each
+    # part's CSV. Reconstruct them by walking items[] the same way.
+    per_item_rows: List[Dict[str, str]] = []
+    per_item_photos: Dict[int, List[Tuple[str, bytes]]] = {}
+    # We already advanced sale_photo_seq while building photo_files.
+    # Instead of redoing that work, re-walk items in order and rebuild
+    # a parallel structure with (row, [(zip_path, data), ...]) so we
+    # can bin-pack into parts.
+    # Reset counters and rebuild.
+    csv_buf2 = io.StringIO()
+    writer2 = csv.DictWriter(csv_buf2, fieldnames=JNJ_CSV_COLUMNS, quoting=csv.QUOTE_MINIMAL)
+    writer2.writeheader()
+    sale_photo_seq2 = 0
+    per_item_data: List[Tuple[Dict[str, str], List[Tuple[str, bytes]]]] = []
+    for idx, it in enumerate(items):
+        item_num = it.get("item_num", "")
+        lot_code = it.get("lot_code", "")
+        description = it.get("description", "")
+        per_item_seller = it.get("sheet_seller_num", "") or it.get("seller_num", "")
+        row = build_jnj_csv_row(
+            item_num, lot_code, description,
+            sale_name, seller_id, seller_start + idx,
+            per_item_seller=per_item_seller,
+        )
+        item_photos = photos_by_item.get(item_num, [])
+        photos_for_item: List[Tuple[str, bytes]] = []
+        for photo_idx, p in enumerate(item_photos[:20], start=1):
+            ext = (p.filename or "photo.jpg").rsplit(".", 1)[-1].lower()
+            if ext not in ("jpg", "jpeg", "png", "webp", "gif", "bmp", "heic"):
+                ext = "jpg"
+            sale_photo_seq2 += 1
+            leaf_name = f"{photo_prefix} {sale_photo_seq2:03d}.{ext}"
+            # These bytes are already loaded into photo_files above;
+            # find them by matching leaf_name.
+            match = next((d for (n, d) in photo_files if n == leaf_name), None)
+            if match is None:
+                # Shouldn't happen; skip gracefully.
+                continue
+            photos_for_item.append((leaf_name, match))
+            row[f"image_{photo_idx}"] = leaf_name
+        per_item_data.append((row, photos_for_item))
+
     slug = re.sub(r"[^A-Za-z0-9]+", "-", sale_name.strip()).strip("-").lower() or "jnj-sale"
-    filename = f"jnj-{slug}-{len(items)}items.zip"
+
+    # Estimate total size (CSV + photos, uncompressed — good-enough
+    # upper bound). Photo bytes dominate; CSV is tiny.
+    total_photo_bytes = sum(len(d) for (_row, phs) in per_item_data for (_n, d) in phs)
+
+    # Path A: fits in one zip → return single zip (unchanged behavior)
+    if total_photo_bytes <= SPLIT_THRESHOLD_BYTES:
+        with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("items.csv", csv_buf.getvalue().encode("utf-8-sig"))
+            for name, data in photo_files:
+                zf.writestr(name, data)
+        zip_bytes = zip_buf.getvalue()
+        filename = f"jnj-{slug}-{len(items)}items.zip"
+        print(f"[jnj-zip] single zip: {len(zip_bytes)/1024/1024:.1f} MB, {len(items)} items", flush=True)
+        return Response(
+            content=zip_bytes,
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    # Path B: split into parts.
+    # Bin-pack items sequentially: keep adding items to the current
+    # part until adding the next item would push us over threshold.
+    parts: List[List[Tuple[Dict[str, str], List[Tuple[str, bytes]]]]] = []
+    current: List[Tuple[Dict[str, str], List[Tuple[str, bytes]]]] = []
+    current_bytes = 0
+    for row, phs in per_item_data:
+        item_bytes = sum(len(d) for (_n, d) in phs)
+        # If this single item is bigger than the threshold on its own
+        # (e.g. someone uploaded a 40 MB uncompressed photo), it still
+        # goes in its own part — better one oversized part than losing
+        # the item entirely. IIS may still 413 it, but that's a
+        # data-quality issue for Ashley to see.
+        if current and current_bytes + item_bytes > SPLIT_THRESHOLD_BYTES:
+            parts.append(current)
+            current = []
+            current_bytes = 0
+        current.append((row, phs))
+        current_bytes += item_bytes
+    if current:
+        parts.append(current)
+
+    n_parts = len(parts)
+    print(f"[jnj-zip] SPLIT into {n_parts} parts (total {total_photo_bytes/1024/1024:.1f} MB, {len(items)} items)", flush=True)
+
+    # Build each part zip in memory and collect them.
+    part_zips: List[Tuple[str, bytes]] = []  # (filename_in_wrapper, bytes)
+    for part_idx, part_items in enumerate(parts, start=1):
+        part_csv = io.StringIO()
+        part_writer = csv.DictWriter(part_csv, fieldnames=JNJ_CSV_COLUMNS, quoting=csv.QUOTE_MINIMAL)
+        part_writer.writeheader()
+        for row, _phs in part_items:
+            part_writer.writerow(row)
+        part_buf = io.BytesIO()
+        with zipfile.ZipFile(part_buf, "w", zipfile.ZIP_DEFLATED) as pzf:
+            pzf.writestr("items.csv", part_csv.getvalue().encode("utf-8-sig"))
+            for _row, phs in part_items:
+                for name, data in phs:
+                    pzf.writestr(name, data)
+        part_bytes = part_buf.getvalue()
+        part_filename = f"jnj-{slug}-part{part_idx}of{n_parts}-{len(part_items)}items.zip"
+        part_zips.append((part_filename, part_bytes))
+        print(f"[jnj-zip]   part {part_idx}/{n_parts}: {len(part_bytes)/1024/1024:.1f} MB, {len(part_items)} items → {part_filename}", flush=True)
+
+    # Build README with clear instructions.
+    readme = (
+        f"J&J Sale: {sale_name or '(unnamed)'}\n"
+        f"Total items: {len(items)}\n"
+        f"Split into {n_parts} upload parts (each under 25 MB to fit\n"
+        f"jnjonlineauction.com's upload limit).\n"
+        f"\n"
+        f"HOW TO UPLOAD\n"
+        f"=============\n"
+        f"1. Extract this zip.  You will see {n_parts} smaller zip files:\n"
+    )
+    for pf, pb in part_zips:
+        readme += f"     - {pf}   ({len(pb)/1024/1024:.1f} MB)\n"
+    readme += (
+        f"\n"
+        f"2. Log in to jnjonlineauction.com  ->  Admin  ->  Import Items.\n"
+        f"3. Upload part 1 FIRST.  Wait until it finishes.\n"
+        f"4. Upload part 2, then part 3, and so on, IN ORDER.\n"
+        f"5. Each part is a complete upload with its own items.csv\n"
+        f"   and its own photos.  You do not need to combine them.\n"
+        f"\n"
+        f"WHY WAS IT SPLIT?\n"
+        f"=================\n"
+        f"jnjonlineauction.com only accepts uploads under ~28 MB per\n"
+        f"file.  This sale's photos totaled {total_photo_bytes/1024/1024:.1f} MB, so\n"
+        f"Drop N Copy split it into {n_parts} smaller uploads.  Item\n"
+        f"numbers stay in order across parts.\n"
+    )
+
+    # Wrap the parts + README into one download.
+    wrapper_buf = io.BytesIO()
+    with zipfile.ZipFile(wrapper_buf, "w", zipfile.ZIP_STORED) as wzf:
+        # STORED (no compression) since the parts are already zipped.
+        wzf.writestr("README-upload-in-order.txt", readme.encode("utf-8"))
+        for pf, pb in part_zips:
+            wzf.writestr(pf, pb)
+    wrapper_bytes = wrapper_buf.getvalue()
+    wrapper_filename = f"jnj-{slug}-SPLIT-into-{n_parts}parts.zip"
     return Response(
-        content=zip_bytes,
+        content=wrapper_bytes,
         media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": f'attachment; filename="{wrapper_filename}"'},
     )
