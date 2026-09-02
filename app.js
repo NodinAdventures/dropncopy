@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-08-31-bigger-thumbs-v25.71";
+const BUILD_ID = "2026-09-02-openai-resilience-v25.72";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -1377,14 +1377,36 @@ async function jnjHandleFiles(input) {
     const results = new Array(batches.length); // Store by index to preserve order.
     let completedBatches = 0;
 
+    // v25.72: wrap each batch in a client-side retry loop that shows a
+    // visible "OpenAI slow, retrying…" status. When OpenAI is flaky, the
+    // server-side _openai_with_retry may still exhaust its 8 attempts and
+    // return a 500; this catches that and retries the whole batch up to 3
+    // more times with a growing pause. Total worst-case: server 8 retries
+    // + client 3 retries = ~11 attempts before we give up on a batch.
+    const CLIENT_BATCH_RETRIES = 3;
     const runBatch = async (batchIdx) => {
-      const fd = new FormData();
-      for (const p of batches[batchIdx]) fd.append("photos", p);
-      fd.append("items_json", itemsJson);
-      const batchData = await postForJson(JNJ_MATCH_PHOTOS_URL, fd, `Photo batch ${batchIdx + 1}/${batches.length}`);
-      results[batchIdx] = batchData.photos || [];
-      completedBatches++;
-      statusEl.textContent = `matching photos… ${completedBatches} of ${batches.length} batches done`;
+      const label = `Photo batch ${batchIdx + 1}/${batches.length}`;
+      let lastErr = null;
+      for (let attempt = 1; attempt <= CLIENT_BATCH_RETRIES + 1; attempt++) {
+        try {
+          const fd = new FormData();
+          for (const p of batches[batchIdx]) fd.append("photos", p);
+          fd.append("items_json", itemsJson);
+          const batchData = await postForJson(JNJ_MATCH_PHOTOS_URL, fd, label);
+          results[batchIdx] = batchData.photos || [];
+          completedBatches++;
+          statusEl.textContent = `matching photos… ${completedBatches} of ${batches.length} batches done`;
+          return;
+        } catch (err) {
+          lastErr = err;
+          if (attempt > CLIENT_BATCH_RETRIES) break;
+          const waitSec = attempt * 10; // 10s, 20s, 30s
+          statusEl.textContent = `OpenAI slow — retrying batch ${batchIdx + 1}/${batches.length} in ${waitSec}s (attempt ${attempt + 1} of ${CLIENT_BATCH_RETRIES + 1})…`;
+          console.warn(`${label} failed on attempt ${attempt}/${CLIENT_BATCH_RETRIES + 1}; retrying in ${waitSec}s. Error:`, err.message);
+          await new Promise(r => setTimeout(r, waitSec * 1000));
+        }
+      }
+      throw lastErr;
     };
 
     // Run batches with a concurrency limit — keeps at most JNJ_PHOTO_CONCURRENCY
