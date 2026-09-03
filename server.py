@@ -95,13 +95,58 @@ def _try_all_detectors(arr) -> str:
     return _stock_decode(arr)
 
 
+def _hits_divider(text: str) -> bool:
+    if not text:
+        return False
+    t = text.strip().upper()
+    # v25.73: also accept the short marker 'DNC-DIV' so future divider
+    # cards printed at very small size (where fewer characters survive
+    # partial decodes) still count.
+    return ("DROPNCOPY-DIVIDER" in t) or ("DNC-DIV" in t)
+
+
+def _rotate_variants(gray):
+    """Yield the original + 90/180/270-degree rotations of a grayscale array."""
+    yield gray
+    try:
+        yield np.rot90(gray, 1)
+        yield np.rot90(gray, 2)
+        yield np.rot90(gray, 3)
+    except Exception:
+        return
+
+
+def _center_crop(gray, frac: float):
+    """Center-crop the array to `frac` of its width/height, safely clamped."""
+    try:
+        h, w = gray.shape[:2]
+        cw = max(64, int(w * frac))
+        ch = max(64, int(h * frac))
+        x0 = max(0, (w - cw) // 2)
+        y0 = max(0, (h - ch) // 2)
+        return gray[y0:y0 + ch, x0:x0 + cw]
+    except Exception:
+        return gray
+
+
 def detect_divider_qr(raw_bytes: bytes) -> bool:
     """Return True if this photo contains the printable DIVIDER card.
 
-    v25.50: FAST path. Real camera photos of the printed card decode
-    with a single WeChat call at 1024px — no need for 12 detection
-    passes. Total budget: ~50-100ms per photo. Only fall back to more
-    thorough checks if the first pass misses.
+    v25.73: expanded detection budget for photos where Kim/Philip shot
+    the divider off-square, from an odd angle, or where the card fills
+    the whole frame with no white border. Prior version only tried the
+    grayscale 1024px original in two detectors; that missed real dividers
+    that Ashley showed up in real sales. Now we try:
+
+      1. WeChat + stock at 1024px grayscale (fast path from v25.50)
+      2. WeChat + stock on 90/180/270 rotations
+      3. WeChat + stock at 1600px (higher res in case QR was small in frame)
+      4. WeChat + stock on a 70% center crop (in case background text
+         confused the detector)
+
+    Total worst-case budget: ~400–600ms per photo, only for the small
+    fraction that don't decode on the fast path. Every non-divider photo
+    still exits in ~50–100ms because we short-circuit on first hit.
 
     The card payload is 'DROPNCOPY-DIVIDER'. We match on this substring
     so both the single card and the numbered cards (DROPNCOPY-DIVIDER-001)
@@ -112,22 +157,42 @@ def detect_divider_qr(raw_bytes: bytes) -> bool:
     try:
         with Image.open(io.BytesIO(raw_bytes)) as img:
             rgb = img.convert("RGB")
-            work = rgb.copy()
-            work.thumbnail((1024, 1024))
-            gray = np.array(work.convert("L"))
-            work.close()
+            # Two working sizes: 1024 fast-path, 1600 for small-QR photos.
+            work1 = rgb.copy()
+            work1.thumbnail((1024, 1024))
+            gray1 = np.array(work1.convert("L"))
+            work1.close()
+            work2 = rgb.copy()
+            work2.thumbnail((1600, 1600))
+            gray2 = np.array(work2.convert("L"))
+            work2.close()
             rgb.close()
 
-        # Fast path: WeChat on grayscale. This catches ~95% of real
-        # camera photos of the printed card in under 100ms.
-        text = _wechat_decode(gray)
-        if text and "DROPNCOPY-DIVIDER" in text:
-            return True
+        # Pass 1: fast path — WeChat + stock on 1024 grayscale.
+        for decode in (_wechat_decode, _stock_decode):
+            if _hits_divider(decode(gray1)):
+                return True
 
-        # Backup path: stock OpenCV detector. Adds maybe 30ms.
-        text = _stock_decode(gray)
-        if text and "DROPNCOPY-DIVIDER" in text:
-            return True
+        # Pass 2: rotations at 1024. WeChat is normally rotation-tolerant
+        # but real phone photos with hard perspective can still miss.
+        for arr in _rotate_variants(gray1):
+            if _hits_divider(_wechat_decode(arr)):
+                return True
+            if _hits_divider(_stock_decode(arr)):
+                return True
+
+        # Pass 3: full-res 1600. Catches divider photos where the card
+        # was small in the frame.
+        for decode in (_wechat_decode, _stock_decode):
+            if _hits_divider(decode(gray2)):
+                return True
+
+        # Pass 4: 70% center crop. Isolates the QR when the background
+        # has extra text/logos that confused earlier passes.
+        cropped = _center_crop(gray2, 0.7)
+        for decode in (_wechat_decode, _stock_decode):
+            if _hits_divider(decode(cropped)):
+                return True
 
         return False
     except Exception as e:
@@ -166,7 +231,12 @@ async def stylecss():
 # it here and pass it in ourselves. We also strip whitespace / quotes in case
 # the value was pasted with any extras.
 _OPENAI_KEY = (os.environ.get("OPENAI_API_KEY") or "").strip().strip('"').strip("'")
-client = AsyncOpenAI(api_key=_OPENAI_KEY) if _OPENAI_KEY else AsyncOpenAI()
+# v25.72: bump per-request timeout from SDK default (10 min total, but often
+# fails much sooner on flaky OpenAI afternoons) to explicit 90s per request.
+# Combined with 8 retries at exponential backoff, that gives ~7 min of grace
+# per photo before we give up. Enough to ride out OpenAI wobbles.
+client = (AsyncOpenAI(api_key=_OPENAI_KEY, timeout=90.0)
+          if _OPENAI_KEY else AsyncOpenAI(timeout=90.0))
 
 @app.get("/api/debug-env")
 async def debug_env():
@@ -431,7 +501,7 @@ Do NOT add commentary, do NOT add a "Transcription:" header, do NOT add column l
 MAX_CONCURRENT = 3
 
 
-async def _openai_with_retry(coro_factory, *, max_attempts: int = 5, op_name: str = "openai"):
+async def _openai_with_retry(coro_factory, *, max_attempts: int = 8, op_name: str = "openai"):
     """Call an OpenAI SDK coroutine with automatic retry on transient errors.
 
     v25.65: added to make sheet builds resilient to short 429 (rate limit)
@@ -2658,18 +2728,31 @@ async def jnj_zip(
     photo_prefix = f"{_short_prefix(sale_folder)}{stamp}"
     # ---------------------------------------------------------------------
 
-    # Build the zip in memory
-    zip_buf = io.BytesIO()
-    csv_buf = io.StringIO()
-    writer = csv.DictWriter(csv_buf, fieldnames=JNJ_CSV_COLUMNS, quoting=csv.QUOTE_MINIMAL)
-    writer.writeheader()
+    # ------------------------------------------------------------------
+    # v25.71: Build per-item structure in ONE pass to avoid the double-
+    # walk photo-drop bug that shipped in v25.70. In v25.70 we walked
+    # items twice — once to build photo_files, and again to bin-pack
+    # into split parts. The second walk did a fragile leaf-name lookup
+    # (`next(d for (n, d) in photo_files if n == leaf_name)`) which
+    # silently dropped a photo if anything about the counter or file
+    # order shifted between the two walks. Symptom: an item that had
+    # its photo attached in Drop N Copy's preview would land in the
+    # J&J-bound zip with no image_1 cell, and their uploader would
+    # reject it with "An image is required to use with a Gallery
+    # Listing".
+    #
+    # Fix: one walk, one authoritative structure.
+    #   per_item_data = [(row_dict, [(leaf_name, bytes), ...]), ...]
+    # From that we build the flat CSV and photo_files for the
+    # single-zip path AND the per-part packing for the split path.
+    # ------------------------------------------------------------------
 
     # Sale-wide photo counter so filenames are sequential across items,
     # matching J&J's sample (TEST 001, TEST 002, TEST 003 …).
     sale_photo_seq = 0
+    per_item_data: List[Tuple[Dict[str, str], List[Tuple[str, bytes]]]] = []
+    dropped_photo_count = 0
 
-    # For each item build a row and, if it has photos, name them + fill image_1..N
-    photo_files: List[Tuple[str, bytes]] = []  # (name_in_zip, bytes)
     for idx, it in enumerate(items):
         item_num = it.get("item_num", "")
         lot_code = it.get("lot_code", "")
@@ -2685,101 +2768,69 @@ async def jnj_zip(
         # Title cap is enforced inside build_jnj_csv_row.
 
         item_photos = photos_by_item.get(item_num, [])
-        for photo_idx, p in enumerate(item_photos[:20], start=1):
-            ext = (p.filename or "photo.jpg").rsplit(".", 1)[-1].lower()
-            if ext not in ("jpg", "jpeg", "png", "webp", "gif", "bmp", "heic"):
-                ext = "jpg"
-            # J&J-style sequential name: "<PREFIX> NNN.<ext>", zero-padded to 3.
-            sale_photo_seq += 1
-            leaf_name = f"{photo_prefix} {sale_photo_seq:03d}.{ext}"
-            # v25.21: uploader still shows "Missing Image" for every row even
-            # though photos ARE in the ZIP. Hypothesis: their uploader uses the
-            # leaf name of the CSV cell to find a file inside the ZIP, and it
-            # extracts to a flat working dir before lookup. So put photos at ZIP
-            # ROOT with bare leaf names, and write the CSV cell as JUST the bare
-            # leaf (no path, no backslash, no ..\). This is what their help
-            # doc literally says: "filename of an image included in the uploaded
-            # zip file" — filename, not path.
-            zip_path = leaf_name
-            csv_ref = leaf_name
-            data = await p.read()
-            # Reset the file position so we don't consume it if it's used again
-            await p.seek(0)
-            photo_files.append((zip_path, data))
-            row[f"image_{photo_idx}"] = csv_ref
-
-        writer.writerow(row)
-
-    # ------------------------------------------------------------------
-    # v25.70: AUTO-SPLIT ZIP if it exceeds jnjonlineauction.com's upload
-    # limit. Their IIS server returns HTTP 413.1 (Request Entity Too
-    # Large) when a single upload is over ~28.6 MB (IIS 7+ default of
-    # maxAllowedContentLength = 30,000,000 bytes). We target 25 MB per
-    # part to leave headroom for multipart HTTP overhead.
-    #
-    # Strategy:
-    #   1. Build the full CSV once (all rows).
-    #   2. Estimate the total zip size (CSV + all photos, deflated).
-    #   3. If it fits under threshold → return single zip like before.
-    #   4. If it doesn't → pack items sequentially into parts. Each part
-    #      contains its OWN items.csv (only the rows for THAT part's
-    #      items) plus THAT part's photos. Each part is a valid
-    #      standalone upload to jnjonlineauction.com.
-    #   5. Bundle the parts into ONE wrapper zip named
-    #      "...-SPLIT-into-Nparts.zip" that Dave extracts locally to get
-    #      N ready-to-upload zips. Include a README.txt with clear
-    #      instructions.
-    # ------------------------------------------------------------------
-    SPLIT_THRESHOLD_BYTES = 25 * 1024 * 1024  # 25 MB per part
-
-    # Rebuild per-item rows keyed by item_num so we can regroup them
-    # into parts. We already wrote rows into csv_buf above in item
-    # order; but we also need the raw row dicts to re-emit into each
-    # part's CSV. Reconstruct them by walking items[] the same way.
-    per_item_rows: List[Dict[str, str]] = []
-    per_item_photos: Dict[int, List[Tuple[str, bytes]]] = {}
-    # We already advanced sale_photo_seq while building photo_files.
-    # Instead of redoing that work, re-walk items in order and rebuild
-    # a parallel structure with (row, [(zip_path, data), ...]) so we
-    # can bin-pack into parts.
-    # Reset counters and rebuild.
-    csv_buf2 = io.StringIO()
-    writer2 = csv.DictWriter(csv_buf2, fieldnames=JNJ_CSV_COLUMNS, quoting=csv.QUOTE_MINIMAL)
-    writer2.writeheader()
-    sale_photo_seq2 = 0
-    per_item_data: List[Tuple[Dict[str, str], List[Tuple[str, bytes]]]] = []
-    for idx, it in enumerate(items):
-        item_num = it.get("item_num", "")
-        lot_code = it.get("lot_code", "")
-        description = it.get("description", "")
-        per_item_seller = it.get("sheet_seller_num", "") or it.get("seller_num", "")
-        row = build_jnj_csv_row(
-            item_num, lot_code, description,
-            sale_name, seller_id, seller_start + idx,
-            per_item_seller=per_item_seller,
-        )
-        item_photos = photos_by_item.get(item_num, [])
         photos_for_item: List[Tuple[str, bytes]] = []
         for photo_idx, p in enumerate(item_photos[:20], start=1):
             ext = (p.filename or "photo.jpg").rsplit(".", 1)[-1].lower()
             if ext not in ("jpg", "jpeg", "png", "webp", "gif", "bmp", "heic"):
                 ext = "jpg"
-            sale_photo_seq2 += 1
-            leaf_name = f"{photo_prefix} {sale_photo_seq2:03d}.{ext}"
-            # These bytes are already loaded into photo_files above;
-            # find them by matching leaf_name.
-            match = next((d for (n, d) in photo_files if n == leaf_name), None)
-            if match is None:
-                # Shouldn't happen; skip gracefully.
+            # Read the bytes ONCE. If read fails (empty stream, corrupt
+            # upload, etc.) log and skip so the counter doesn't advance
+            # for a phantom photo.
+            try:
+                data = await p.read()
+            except Exception as e:
+                print(f"[jnj-zip] WARN: failed to read photo for item {item_num}: {e}", flush=True)
+                dropped_photo_count += 1
                 continue
-            photos_for_item.append((leaf_name, match))
+            if not data:
+                print(f"[jnj-zip] WARN: empty photo bytes for item {item_num}, filename={p.filename}", flush=True)
+                dropped_photo_count += 1
+                continue
+            # Try to seek so this UploadFile can be re-read if anything
+            # else needs it. Ignore errors — we already have the bytes.
+            try:
+                await p.seek(0)
+            except Exception:
+                pass
+            # J&J-style sequential name: "<PREFIX> NNN.<ext>", zero-padded to 3.
+            sale_photo_seq += 1
+            leaf_name = f"{photo_prefix} {sale_photo_seq:03d}.{ext}"
+            photos_for_item.append((leaf_name, data))
+            # v25.21: uploader looks for the leaf name of the CSV cell,
+            # so image_N is just the bare leaf (no path, no backslash).
             row[f"image_{photo_idx}"] = leaf_name
+
+        # v25.71: sanity log — if Drop N Copy's preview said this item
+        # had photos but nothing landed here, we want it visible in
+        # Render logs so we can diagnose.
+        if photos_by_item.get(item_num) and not photos_for_item:
+            print(f"[jnj-zip] WARN: item {item_num} had {len(photos_by_item[item_num])} photos in preview but 0 in export", flush=True)
         per_item_data.append((row, photos_for_item))
 
+    # Flatten for the single-zip path.
+    csv_buf = io.StringIO()
+    writer = csv.DictWriter(csv_buf, fieldnames=JNJ_CSV_COLUMNS, quoting=csv.QUOTE_MINIMAL)
+    writer.writeheader()
+    photo_files: List[Tuple[str, bytes]] = []
+    for row, phs in per_item_data:
+        writer.writerow(row)
+        for name, data in phs:
+            photo_files.append((name, data))
+
+    print(f"[jnj-zip] built per_item_data: {len(per_item_data)} items, {len(photo_files)} photos total, {dropped_photo_count} dropped", flush=True)
+
+    # ------------------------------------------------------------------
+    # v25.70/71: AUTO-SPLIT ZIP if total exceeds jnjonlineauction.com's
+    # upload limit. Their IIS server returns HTTP 413.1 (Request Entity
+    # Too Large) when a single upload is over ~28.6 MB (IIS 7+ default
+    # of maxAllowedContentLength = 30,000,000 bytes). We target 25 MB
+    # per part to leave headroom for multipart HTTP overhead.
+    # ------------------------------------------------------------------
+    SPLIT_THRESHOLD_BYTES = 25 * 1024 * 1024  # 25 MB per part
+    zip_buf = io.BytesIO()
     slug = re.sub(r"[^A-Za-z0-9]+", "-", sale_name.strip()).strip("-").lower() or "jnj-sale"
 
-    # Estimate total size (CSV + photos, uncompressed — good-enough
-    # upper bound). Photo bytes dominate; CSV is tiny.
+    # Estimate total size (photos only — CSV is negligible).
     total_photo_bytes = sum(len(d) for (_row, phs) in per_item_data for (_n, d) in phs)
 
     # Path A: fits in one zip → return single zip (unchanged behavior)

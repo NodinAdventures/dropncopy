@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-09-02-openai-resilience-v25.72";
+const BUILD_ID = "2026-09-03-qr-plus-rowkey-v25.73";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v25.71 boot. BUILD_ID:", "2026-08-31-bigger-thumbs-v25.71");
+jnjLog("BOOT", "v25.73 boot. BUILD_ID:", "2026-09-03-qr-plus-rowkey-v25.73");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -1108,7 +1108,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v25.71 · ${BUILD_ID}`;
+  badge.textContent = `v25.73 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
@@ -1349,6 +1349,30 @@ async function jnjHandleFiles(input) {
     }
     if (!items.length) throw new Error("Sheets transcribed but no item rows were parsed.");
 
+    // v25.73: assign each item a synthetic UNIQUE key. Prior to this, we
+    // indexed itemPhotos by item_num, which silently collapsed items when
+    // two sheets happened to have overlapping lot numbers (e.g., two sellers
+    // both listed lot 1267). Photos meant for the second item ended up
+    // duplicated onto the first. `_row_key` is the item's canonical ID
+    // used ONLY for internal lookups; item_num is still what the user sees
+    // and what appears on the CSV.
+    items.forEach((it, idx) => {
+      it._row_key = `row${idx}`;
+    });
+    // Warn if we detected duplicate item_nums so Ashley can spot it.
+    const _dupCheck = new Map();
+    let _dupCount = 0;
+    for (const it of items) {
+      const k = String(it.item_num || "");
+      if (!k) continue;
+      if (_dupCheck.has(k)) _dupCount++;
+      _dupCheck.set(k, (_dupCheck.get(k) || 0) + 1);
+    }
+    if (_dupCount > 0) {
+      const dupNums = [...(_dupCheck.entries())].filter(([_, n]) => n > 1).map(([k, n]) => `${k}×${n}`);
+      jnjLog("DUPLICATE-ITEM-NUMS", `Found ${_dupCount} items whose lot # is shared with another item on this sale. Photos will be kept separate via _row_key. Duplicates: ${dupNums.join(", ")}`);
+    }
+
     // Auto-fill Seller ID with the FIRST detected number (display fallback
     // for items whose sheet produced no boxed # at all). Each item's own
     // sheet_seller_num is what actually goes on its CSV row.
@@ -1454,8 +1478,11 @@ async function jnjHandleFiles(input) {
     //   - 1 photo per item                     → all correct
     //   - tag anchor skips an item             → tag wins, following photos follow
     //   - only one item photographed           → no false scene changes
-    const itemNumByIndex = items.map(i => i.item_num);
-    const indexByItemNum = new Map(items.map((i, idx) => [i.item_num, idx]));
+    // v25.73: use _row_key (unique per item) instead of item_num so that
+    // sales with duplicate lot #s across sheets don't collapse together.
+    const rowKeyByIndex = items.map(i => i._row_key);
+    const itemNumByIndex = items.map(i => i.item_num); // still used for display/CSV
+    const indexByRowKey = new Map(items.map((i, idx) => [i._row_key, idx]));
 
     // Hamming distance between two 16-char hex (64-bit) dhashes.
     function hammingDist(h1, h2) {
@@ -1593,7 +1620,10 @@ async function jnjHandleFiles(input) {
         continue;
       }
       if (p.match_kind === "none") {
+        // v25.73: also stamp the unique _row_key so we can bucket photos
+        // even when two items share the same item_num.
         p.item_num_match = itemNumByIndex[cursor] || "";
+        p.row_key_match = rowKeyByIndex[cursor] || "";
         p.match_kind = p.item_num_match ? "order" : "none";
         currentItemGotPhoto = true;
         walkTrace.push(`${p.filename}→${p.item_num_match || "?"}`);
@@ -1655,6 +1685,8 @@ async function jnjHandleFiles(input) {
         tag_read: p.tag_read,
         description_read: p.description_read,
         item_num_match: p.item_num_match,
+        // v25.73: carry the unique row key so bucketing survives duplicate item_nums.
+        row_key_match: p.row_key_match || "",
         match_kind: p.match_kind,
         dhash: p.dhash || "",
         is_blank: p.is_blank || false,
@@ -1663,10 +1695,13 @@ async function jnjHandleFiles(input) {
     if (fileMissCount > 0) {
       jnjLog("FILE-LOOKUP-MISS", `${fileMissCount} of ${allPhotoInfos.length} photos could not resolve to a File object; first few names:`, allPhotoInfos.slice(0, 5).map(p => p.filename).join(" | "));
     }
+    // v25.73: key by _row_key (unique) instead of item_num (may repeat).
+    // Downstream code that reads jnjState.itemPhotos[itemNum] is updated
+    // below to use the item object's _row_key instead.
     const itemPhotos = {};
     const unmatched = [];
     const blanks = [];
-    for (const it of items) itemPhotos[it.item_num] = [];
+    for (const it of items) itemPhotos[it._row_key] = [];
     // Iterate in original upload order so the item-cards list photos in the
     // sequence Dave took them.
     for (const p of allPhotoInfos) {
@@ -1676,8 +1711,8 @@ async function jnjHandleFiles(input) {
         // Blank divider — not assigned, not unmatched, just tracked so we
         // can show a count/toast to the user.
         blanks.push(p.filename);
-      } else if (info.item_num_match && itemPhotos[info.item_num_match]) {
-        itemPhotos[info.item_num_match].push(p.filename);
+      } else if (info.row_key_match && itemPhotos[info.row_key_match]) {
+        itemPhotos[info.row_key_match].push(p.filename);
       } else {
         unmatched.push(p.filename);
       }
@@ -1907,6 +1942,8 @@ function jnjRenderPreview() {
     const card = document.createElement("div");
     card.className = "jnj-item-card";
     card.dataset.itemNum = it.item_num;
+    // v25.73: unique row key for photo bucket lookup (handles duplicate item_nums).
+    card.dataset.rowKey = it._row_key || "";
     // v25.58: attach flag classes so CSS can highlight suspicious rows.
     const flg = _flags.get(it.item_num) || { lot: false, seller: false };
     if (flg.lot) card.classList.add("jnj-flag-lot");
@@ -1921,7 +1958,8 @@ function jnjRenderPreview() {
     // and tap-fix any item that got attached to the wrong seller box.
     const lotHtml = `<span class="lot-code lot-code-editable" contenteditable="true" spellcheck="false" data-field="lot_code" title="Tap to fix lot code">${escapeHtml(it.lot_code || "—")}</span>`;
     const sellerHtml = `<span class="seller-pill seller-pill-editable" contenteditable="true" spellcheck="false" data-field="sheet_seller_num" title="Seller # from the boxed number on the sheet — tap to fix">SELLER ${escapeHtml(it.sheet_seller_num || "?")}</span>`;
-    const photos = jnjState.itemPhotos[it.item_num] || [];
+    // v25.73: lookup by _row_key (unique) instead of item_num (may repeat).
+    const photos = jnjState.itemPhotos[it._row_key] || [];
     const photosHtml = photos.length
       ? photos.map(fname => jnjPhotoThumbHtml(fname)).join("")
       : `<div class="jnj-item-photos empty">no photo</div>`;
@@ -1996,10 +2034,11 @@ function jnjRenderPreview() {
       e.preventDefault();
       card.classList.remove("drag-over");
       const fname = e.dataTransfer.getData("application/x-jnj-photo");
-      jnjMovePhotoTo(fname, it.item_num);
+      // v25.73: pass the unique row key instead of item_num.
+      jnjMovePhotoTo(fname, it._row_key);
     });
     // Retry button
-    card.querySelector(".jnj-retry-btn").addEventListener("click", () => jnjRetryMatch(it.item_num));
+    card.querySelector(".jnj-retry-btn").addEventListener("click", () => jnjRetryMatch(it._row_key));
   }
 
   // Unmatched photos pool
@@ -2167,9 +2206,11 @@ document.addEventListener("click", (e) => {
     jnjRenderPreview();
   } else if (itemCard && jnjSelectedPhoto) {
     // Tap an item card with a selected photo -> assign
+    // v25.73: pass row_key (unique) to the mover; keep item_num for the toast.
+    const rowKey = itemCard.dataset.rowKey || itemCard.dataset.itemNum;
     const itemNum = itemCard.dataset.itemNum;
-    if (itemNum) {
-      jnjMovePhotoTo(jnjSelectedPhoto, itemNum);
+    if (rowKey) {
+      jnjMovePhotoTo(jnjSelectedPhoto, rowKey);
       toast(`Assigned to ${itemNum}.`);
       jnjSelectedPhoto = null;
     }
@@ -2181,7 +2222,10 @@ document.addEventListener("click", (e) => {
   }
 });
 
-function jnjMovePhotoTo(fname, targetItemNum) {
+// v25.73: `target` is now a _row_key (unique) rather than item_num.
+// Callers pass it.item_num pre-25.73 or it._row_key from 25.73 on;
+// we resolve either one to the correct bucket for backward compatibility.
+function jnjMovePhotoTo(fname, target) {
   if (!jnjState) return;
   // Remove from wherever it currently is
   for (const key of Object.keys(jnjState.itemPhotos)) {
@@ -2190,14 +2234,27 @@ function jnjMovePhotoTo(fname, targetItemNum) {
   jnjState.unmatched = jnjState.unmatched.filter(f => f !== fname);
 
   // Add to target
-  if (targetItemNum === null) {
+  if (target === null) {
     jnjState.unmatched.push(fname);
     const info = jnjState.photos.get(fname);
-    if (info) { info.item_num_match = ""; info.match_kind = "none"; }
-  } else if (jnjState.itemPhotos[targetItemNum] !== undefined) {
-    jnjState.itemPhotos[targetItemNum].push(fname);
-    const info = jnjState.photos.get(fname);
-    if (info) { info.item_num_match = targetItemNum; info.match_kind = "manual"; }
+    if (info) { info.item_num_match = ""; info.row_key_match = ""; info.match_kind = "none"; }
+  } else {
+    // Resolve target: it may be a row_key (v25.73+) or an item_num (legacy).
+    let bucketKey = target;
+    let matchedItem = jnjState.items.find(i => i._row_key === target);
+    if (!matchedItem) {
+      matchedItem = jnjState.items.find(i => i.item_num === target);
+      if (matchedItem) bucketKey = matchedItem._row_key;
+    }
+    if (bucketKey && jnjState.itemPhotos[bucketKey] !== undefined) {
+      jnjState.itemPhotos[bucketKey].push(fname);
+      const info = jnjState.photos.get(fname);
+      if (info) {
+        info.item_num_match = matchedItem ? matchedItem.item_num : "";
+        info.row_key_match = bucketKey;
+        info.match_kind = "manual";
+      }
+    }
   }
   jnjRenderPreview();
 }
