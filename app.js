@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-09-03-qr-plus-rowkey-v25.73";
+const BUILD_ID = "2026-09-03-zip-export-hotfix-v25.73.1";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v25.73 boot. BUILD_ID:", "2026-09-03-qr-plus-rowkey-v25.73");
+jnjLog("BOOT", "v25.73.1 boot. BUILD_ID:", "2026-09-03-zip-export-hotfix-v25.73.1");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -1108,7 +1108,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v25.73 · ${BUILD_ID}`;
+  badge.textContent = `v25.73.1 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
@@ -2083,23 +2083,12 @@ function jnjRenderPreview() {
       const suffixMatch = input.match(/^[A-Za-z]*\d+([A-Za-z]+)$/);
       const suffix = suffixMatch ? suffixMatch[1].toUpperCase() : "";
 
-      // v25.62: SNAPSHOT + REBUILD approach. Instead of mutating in place
-      // (which reorders itemPhotos when we delete+re-add keys, and can
-      // create key collisions if two rows swap numbers), we:
-      //   1. snapshot each affected item's OLD photo list before mutating
-      //   2. mutate item_num on the items in place
-      //   3. rebuild jnjState.itemPhotos from scratch in items[] order,
-      //      using each item's NEW item_num as the key
-      //   4. update photos[*].item_num_match by matching filename to the
-      //      item that owns it in the new mapping
+      // v25.73: itemPhotos is now keyed by the stable _row_key (unique per
+      // row), so renumbering item_num does NOT invalidate the photo mapping.
+      // We just: (a) mutate item_num on affected rows in place, (b) update
+      // each affected photo's cached item_num_match string. row_key_match
+      // stays valid because _row_key never changes.
       const affected = jnjState.items.filter(x => (x.sheet_index !== undefined ? x.sheet_index : 0) === sheetKey);
-
-      // Snapshot: for each affected item, remember what photo filenames it had.
-      const snapshotByOldItem = new Map(); // oldItemNum -> [filenames]
-      affected.forEach(it => {
-        const list = (jnjState.itemPhotos && jnjState.itemPhotos[it.item_num]) || [];
-        snapshotByOldItem.set(it.item_num, list.slice());
-      });
 
       // Rename table so we can log what happened.
       const rename = new Map();
@@ -2108,42 +2097,22 @@ function jnjRenderPreview() {
         if (it.item_num !== newNum) rename.set(it.item_num, newNum);
       });
 
-      // Now mutate item_num for the affected rows. We save each old key so we
-      // can retrieve the snapshot afterward.
-      const oldNums = affected.map(it => it.item_num);
+      // Now mutate item_num for the affected rows.
       affected.forEach((it, i) => {
         it.item_num = `${prefix}${firstNum + i}${suffix}`;
       });
 
-      // REBUILD itemPhotos from scratch in items[] order so downstream
-      // FormData iteration matches item iteration. Also guarantees the map's
-      // iteration order stays parallel to jnjState.items.
-      const newItemPhotos = {};
-      jnjState.items.forEach((it, i) => {
-        // Find the old item_num for THIS row (by index in the affected sublist).
-        const affectedIdx = affected.indexOf(it);
-        let list;
-        if (affectedIdx >= 0) {
-          // This row was renamed — look up its photos by the OLD number.
-          const oldKey = oldNums[affectedIdx];
-          list = snapshotByOldItem.get(oldKey) || [];
-        } else {
-          // Row from another sheet — keep its existing photo list.
-          list = (jnjState.itemPhotos && jnjState.itemPhotos[it.item_num]) || [];
-        }
-        newItemPhotos[it.item_num] = list.slice();
-      });
-      jnjState.itemPhotos = newItemPhotos;
-
-      // Update photos[*].item_num_match: any filename referenced by a
-      // renamed key must now point at the NEW key. Do this by walking the
-      // rebuilt itemPhotos and setting every photo's item_num_match to its
-      // owning item.
+      // Update every photo's cached item_num_match string. Since itemPhotos
+      // is keyed by _row_key, we walk it and refresh item_num_match from
+      // the current items[] state.
       if (jnjState.photos) {
-        Object.entries(jnjState.itemPhotos).forEach(([itemNum, fnames]) => {
+        const itemByRowKey = new Map(jnjState.items.map(it => [it._row_key, it]));
+        Object.entries(jnjState.itemPhotos).forEach(([rowKey, fnames]) => {
+          const it = itemByRowKey.get(rowKey);
+          const newItemNum = it ? it.item_num : "";
           fnames.forEach(fname => {
             const info = jnjState.photos.get(fname);
-            if (info) info.item_num_match = itemNum;
+            if (info) info.item_num_match = newItemNum;
           });
         });
       }
@@ -2259,20 +2228,24 @@ function jnjMovePhotoTo(fname, target) {
   jnjRenderPreview();
 }
 
-async function jnjRetryMatch(itemNum) {
+// v25.73: takes _row_key (unique per item) as arg. jnjMovePhotoTo still
+// handles item_num for backward-compat if an older path passes one in.
+async function jnjRetryMatch(rowKey) {
   if (!jnjState) return;
-  const currentPhotos = jnjState.itemPhotos[itemNum] || [];
-  if (currentPhotos.length === 0) {
+  const bucket = jnjState.itemPhotos[rowKey] || [];
+  if (bucket.length === 0) {
     toast("No photo assigned to retry.");
     return;
   }
+  const item = jnjState.items.find(i => i._row_key === rowKey);
+  const itemNum = item ? item.item_num : "";
   // Pop the first photo, ask AI to re-match it
-  const fname = currentPhotos[0];
+  const fname = bucket[0];
   const info = jnjState.photos.get(fname);
   if (!info) return;
 
   // Move it to unmatched first
-  jnjState.itemPhotos[itemNum] = jnjState.itemPhotos[itemNum].filter(f => f !== fname);
+  jnjState.itemPhotos[rowKey] = jnjState.itemPhotos[rowKey].filter(f => f !== fname);
   jnjState.unmatched.push(fname);
   jnjRenderPreview();
 
@@ -2281,13 +2254,15 @@ async function jnjRetryMatch(itemNum) {
     const fd = new FormData();
     fd.append("photo_id", info.id || fname);
     fd.append("description", info.description_read || "");
-    // Filter out the wrong item from the list we send
-    const filteredItems = jnjState.items.filter(i => i.item_num !== itemNum);
+    // Filter out the wrong item from the list we send. Use _row_key so we
+    // don't accidentally drop a different item that shares the same lot #.
+    const filteredItems = jnjState.items.filter(i => i._row_key !== rowKey);
     fd.append("items_json", JSON.stringify(filteredItems));
     const res = await fetch(JNJ_REMATCH_URL, { method: "POST", body: fd });
     if (!res.ok) throw new Error(`retry failed (${res.status})`);
     const data = await res.json();
     if (data.item_num_match) {
+      // Backend returns an item_num; jnjMovePhotoTo will resolve to _row_key.
       jnjMovePhotoTo(fname, data.item_num_match);
       toast(`Re-matched to ${data.item_num_match}.`);
     } else {
@@ -2320,11 +2295,17 @@ async function jnjDownloadZip() {
     // it iterates items. If the browser sends photos in a different order
     // than items iterate, the photo filenames in the CSV can end up mapped
     // to the wrong lot on J&J's website.
+    //
+    // v25.73 hotfix: itemPhotos is now keyed by _row_key (unique per item),
+    // not by item_num (which can repeat across sheets). Iterate items in
+    // order and look up their photos by _row_key. The photo_map still maps
+    // filename→item_num because that's what the server-side CSV builder
+    // and jnjonlineauction.com actually need on the row.
     const photoMap = {};
-    const orderedItemNums = jnjState.items.map(it => it.item_num);
-    for (const itemNum of orderedItemNums) {
-      const fnames = jnjState.itemPhotos[itemNum] || [];
-      for (const fname of fnames) photoMap[fname] = itemNum;
+    for (const it of jnjState.items) {
+      const bucketKey = it._row_key || it.item_num;
+      const fnames = (jnjState.itemPhotos && jnjState.itemPhotos[bucketKey]) || [];
+      for (const fname of fnames) photoMap[fname] = it.item_num;
     }
 
     const fd = new FormData();
