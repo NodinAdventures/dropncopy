@@ -21,7 +21,7 @@ from typing import List, Tuple, Dict, Any, Optional
 import os
 
 from openai import AsyncOpenAI, RateLimitError, APIStatusError, APIConnectionError, APITimeoutError
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Request
 from fastapi.responses import StreamingResponse, FileResponse, Response, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -498,9 +498,14 @@ Do NOT add commentary, do NOT add a "Transcription:" header, do NOT add column l
 # Parallelism cap so we don't overrun API rate limits on huge docs.
 # v25.65: temporarily lowered 8 -> 3 while account is on OpenAI Tier 1
 # (30k TPM). 8 parallel gpt-4o high-detail calls could burst past 30k
-# tokens in one minute and trigger 429s. Bump back to 8 once the
-# account reaches Tier 2 (450k TPM, ~7 days after the $50 top-up).
-MAX_CONCURRENT = 3
+# tokens in one minute and trigger 429s.
+# v25.75: account is now Tier 2 (450k TPM, 15x headroom). Bumped back
+# to 8. This is the ~2.5x speedup that should have shipped weeks ago
+# once the account graduated — the cap was left at 3 by mistake. Even
+# with two parallel builds each doing 8 = 16 concurrent calls at
+# ~5k tokens each = 80k tokens/minute burst, still comfortably under
+# the 450k Tier 2 cap.
+MAX_CONCURRENT = 8
 
 
 async def _openai_with_retry(coro_factory, *, max_attempts: int = 8, op_name: str = "openai"):
@@ -2634,6 +2639,7 @@ async def jnj_rematch(
 
 @app.post("/api/jnj-zip")
 async def jnj_zip(
+    request: Request,
     sale_name: str = Form(""),
     seller_id: str = Form(""),
     seller_start: int = Form(1000),
@@ -2750,45 +2756,71 @@ async def jnj_zip(
     # ------------------------------------------------------------------
 
     # ------------------------------------------------------------------
-    # v25.74: DISK-STREAMED build. Previous versions held every photo's
-    # bytes AND the assembled ZIP in memory simultaneously, which meant
-    # two concurrent 15 MB builds would each need ~30-40 MB of RAM at
-    # peak (raw bytes + zipped bytes + Python overhead). On Render's
-    # Standard plan (2 GB) that was fine solo, but two Kim/Philip
-    # builds firing at the same time were pushing into memory pressure
-    # — uvicorn workers would get killed and browsers would see
-    # `TypeError: Failed to fetch`.
+    # v25.75: HYBRID RAM/DISK build. v25.74 fixed "Failed to fetch" on
+    # parallel builds by streaming everything to disk, but disk I/O made
+    # every build measurably slower even for tiny sales. This version
+    # restores v25.73.1's fast in-memory path for typical sales and only
+    # falls back to disk for sales big enough to threaten memory (>50 MB
+    # of photo uploads, or Content-Length hint >65 MB with form overhead).
     #
-    # Fix: stream each photo directly to a temp file on disk as we read
-    # it, build the ZIP(s) to another temp file with ZipFile using the
-    # temp photo files as sources, then StreamingResponse the final ZIP
-    # back to the browser in 64 KB chunks. Memory stays flat regardless
-    # of sale size or how many builds run concurrently.
+    # Decision is silent — users see no difference. Small/medium sales
+    # get yesterday's speed. Huge sales still can't OOM the worker.
     # ------------------------------------------------------------------
+    RAM_PATH_MAX_BYTES = 50 * 1024 * 1024   # 50 MB photos → stay in RAM
+    RAM_PATH_MAX_CONTENT_LENGTH = 65 * 1024 * 1024  # request size hint
     SPLIT_THRESHOLD_BYTES = 25 * 1024 * 1024  # 25 MB per part
+
+    # Peek at request Content-Length as a cheap upfront hint. If the
+    # whole multipart body is comfortably small, we KNOW the RAM path
+    # is safe without even reading the uploads yet. If it's big or
+    # unknown, we'll still measure exact photo bytes as we go and
+    # decide then.
+    try:
+        content_length = int(request.headers.get("content-length") or 0)
+    except Exception:
+        content_length = 0
+    force_disk_path = content_length > RAM_PATH_MAX_CONTENT_LENGTH
+    print(f"[jnj-zip] content_length={content_length/1024/1024:.1f} MB, force_disk_path={force_disk_path}", flush=True)
     CHUNK = 64 * 1024
     slug = re.sub(r"[^A-Za-z0-9]+", "-", sale_name.strip()).strip("-").lower() or "jnj-sale"
 
-    # One temp working dir for the whole request — cleaned up by the
-    # StreamingResponse `background` callback once the client has the file.
-    work_dir = tempfile.mkdtemp(prefix="jnjzip-")
-    photos_dir = os.path.join(work_dir, "photos")
-    os.makedirs(photos_dir, exist_ok=True)
+    # Temp working dir is created lazily — only if we spill to the disk
+    # path. Small builds finish in RAM and never touch disk at all.
+    work_dir: Optional[str] = None
+    photos_dir: Optional[str] = None
+
+    def _ensure_work_dir():
+        nonlocal work_dir, photos_dir
+        if work_dir is None:
+            work_dir = tempfile.mkdtemp(prefix="jnjzip-")
+            photos_dir = os.path.join(work_dir, "photos")
+            os.makedirs(photos_dir, exist_ok=True)
 
     def _cleanup():
-        try:
-            shutil.rmtree(work_dir, ignore_errors=True)
-        except Exception:
-            pass
+        if work_dir is not None:
+            try:
+                shutil.rmtree(work_dir, ignore_errors=True)
+            except Exception:
+                pass
 
     try:
-        # Sale-wide photo counter so filenames are sequential across items,
-        # matching J&J's sample (TEST 001, TEST 002, TEST 003 …).
+        # ==============================================================
+        # PASS 1: read every photo into RAM, tracking total bytes. This
+        # is what v25.73.1 (yesterday's fast version) did. If total stays
+        # under RAM_PATH_MAX_BYTES and Content-Length didn't already
+        # force us to disk, we build the ZIP in RAM — no disk I/O at all.
+        # If we cross the threshold, we spill everything to disk mid-loop
+        # and continue on the safe disk path.
+        # ==============================================================
         sale_photo_seq = 0
-        # per_item_data holds (row_dict, [(leaf_name, disk_path, size_bytes), ...])
-        # instead of raw bytes. Disk paths point into photos_dir.
-        per_item_data: List[Tuple[Dict[str, str], List[Tuple[str, str, int]]]] = []
+        # In-RAM entry: (leaf_name, bytes_or_None, disk_path_or_None, size)
+        # Exactly one of bytes/disk_path is set per entry.
+        per_item_data: List[Tuple[Dict[str, str], List[Tuple[str, Optional[bytes], Optional[str], int]]]] = []
         dropped_photo_count = 0
+        running_bytes = 0
+        spilled_to_disk = force_disk_path
+        if spilled_to_disk:
+            _ensure_work_dir()
 
         for idx, it in enumerate(items):
             item_num = it.get("item_num", "")
@@ -2802,85 +2834,169 @@ async def jnj_zip(
             )
 
             item_photos = photos_by_item.get(item_num, [])
-            photos_for_item: List[Tuple[str, str, int]] = []
+            photos_for_item: List[Tuple[str, Optional[bytes], Optional[str], int]] = []
             for photo_idx, p in enumerate(item_photos[:20], start=1):
                 ext = (p.filename or "photo.jpg").rsplit(".", 1)[-1].lower()
                 if ext not in ("jpg", "jpeg", "png", "webp", "gif", "bmp", "heic"):
                     ext = "jpg"
                 sale_photo_seq += 1
                 leaf_name = f"{photo_prefix} {sale_photo_seq:03d}.{ext}"
-                disk_path = os.path.join(photos_dir, leaf_name)
-                # Stream the upload to disk in chunks. If it fails or is
-                # empty, roll the counter back so we don't have a hole.
-                bytes_written = 0
-                try:
-                    with open(disk_path, "wb") as fout:
-                        while True:
-                            chunk = await p.read(CHUNK)
-                            if not chunk:
-                                break
-                            fout.write(chunk)
-                            bytes_written += len(chunk)
-                except Exception as e:
-                    print(f"[jnj-zip] WARN: failed to read photo for item {item_num}: {e}", flush=True)
-                    dropped_photo_count += 1
-                    sale_photo_seq -= 1
+
+                # ---------- read the upload ----------
+                data: Optional[bytes] = None
+                disk_path: Optional[str] = None
+                size = 0
+                if spilled_to_disk:
+                    # Stream directly to disk (v25.74 behavior).
+                    _ensure_work_dir()
+                    disk_path = os.path.join(photos_dir, leaf_name)  # type: ignore[arg-type]
                     try:
-                        os.remove(disk_path)
-                    except Exception:
-                        pass
-                    continue
-                if bytes_written == 0:
-                    print(f"[jnj-zip] WARN: empty photo bytes for item {item_num}, filename={p.filename}", flush=True)
-                    dropped_photo_count += 1
-                    sale_photo_seq -= 1
+                        with open(disk_path, "wb") as fout:
+                            while True:
+                                chunk = await p.read(CHUNK)
+                                if not chunk:
+                                    break
+                                fout.write(chunk)
+                                size += len(chunk)
+                    except Exception as e:
+                        print(f"[jnj-zip] WARN: failed to read photo for item {item_num}: {e}", flush=True)
+                        dropped_photo_count += 1
+                        sale_photo_seq -= 1
+                        try:
+                            os.remove(disk_path)
+                        except Exception:
+                            pass
+                        continue
+                    if size == 0:
+                        print(f"[jnj-zip] WARN: empty photo bytes for item {item_num}, filename={p.filename}", flush=True)
+                        dropped_photo_count += 1
+                        sale_photo_seq -= 1
+                        try:
+                            os.remove(disk_path)
+                        except Exception:
+                            pass
+                        continue
+                else:
+                    # Read fully into RAM (v25.73.1 behavior).
                     try:
-                        os.remove(disk_path)
-                    except Exception:
-                        pass
-                    continue
+                        data = await p.read()
+                    except Exception as e:
+                        print(f"[jnj-zip] WARN: failed to read photo for item {item_num}: {e}", flush=True)
+                        dropped_photo_count += 1
+                        sale_photo_seq -= 1
+                        continue
+                    if not data:
+                        print(f"[jnj-zip] WARN: empty photo bytes for item {item_num}, filename={p.filename}", flush=True)
+                        dropped_photo_count += 1
+                        sale_photo_seq -= 1
+                        continue
+                    size = len(data)
                 try:
                     await p.seek(0)
                 except Exception:
                     pass
-                photos_for_item.append((leaf_name, disk_path, bytes_written))
+
+                running_bytes += size
+                photos_for_item.append((leaf_name, data, disk_path, size))
                 row[f"image_{photo_idx}"] = leaf_name
+
+                # ---------- spill to disk if RAM path is now too big ----------
+                if not spilled_to_disk and running_bytes > RAM_PATH_MAX_BYTES:
+                    print(f"[jnj-zip] spilling to disk mid-read at {running_bytes/1024/1024:.1f} MB", flush=True)
+                    _ensure_work_dir()
+                    # Persist every already-collected RAM photo to disk
+                    # so the rest of the pipeline can use one uniform path.
+                    new_per_item: List[Tuple[Dict[str, str], List[Tuple[str, Optional[bytes], Optional[str], int]]]] = []
+                    for r2, phs2 in per_item_data:
+                        migrated: List[Tuple[str, Optional[bytes], Optional[str], int]] = []
+                        for ln, dbytes, dp, sz in phs2:
+                            if dp is None and dbytes is not None:
+                                dp2 = os.path.join(photos_dir, ln)  # type: ignore[arg-type]
+                                with open(dp2, "wb") as fout:
+                                    fout.write(dbytes)
+                                migrated.append((ln, None, dp2, sz))
+                            else:
+                                migrated.append((ln, dbytes, dp, sz))
+                        new_per_item.append((r2, migrated))
+                    per_item_data = new_per_item
+                    # Also persist the current item's photos so far.
+                    migrated_cur: List[Tuple[str, Optional[bytes], Optional[str], int]] = []
+                    for ln, dbytes, dp, sz in photos_for_item:
+                        if dp is None and dbytes is not None:
+                            dp2 = os.path.join(photos_dir, ln)  # type: ignore[arg-type]
+                            with open(dp2, "wb") as fout:
+                                fout.write(dbytes)
+                            migrated_cur.append((ln, None, dp2, sz))
+                        else:
+                            migrated_cur.append((ln, dbytes, dp, sz))
+                    photos_for_item = migrated_cur
+                    spilled_to_disk = True
 
             if photos_by_item.get(item_num) and not photos_for_item:
                 print(f"[jnj-zip] WARN: item {item_num} had {len(photos_by_item[item_num])} photos in preview but 0 in export", flush=True)
             per_item_data.append((row, photos_for_item))
 
         total_photos = sum(len(phs) for (_r, phs) in per_item_data)
-        total_photo_bytes = sum(sz for (_r, phs) in per_item_data for (_n, _p, sz) in phs)
-        print(f"[jnj-zip] built per_item_data: {len(per_item_data)} items, {total_photos} photos total, {dropped_photo_count} dropped, {total_photo_bytes/1024/1024:.1f} MB on disk", flush=True)
+        total_photo_bytes = sum(sz for (_r, phs) in per_item_data for (_ln, _b, _p, sz) in phs)
+        path_label = "disk" if spilled_to_disk else "ram"
+        print(f"[jnj-zip] built per_item_data: {len(per_item_data)} items, {total_photos} photos, {dropped_photo_count} dropped, {total_photo_bytes/1024/1024:.1f} MB (path={path_label})", flush=True)
+
+        # ==============================================================
+        # PASS 2: build ZIP. Two flavors depending on whether we
+        # stayed in RAM or spilled to disk. Shared helper for adding a
+        # photo entry so the two branches stay in lockstep.
+        # ==============================================================
+        def _add_photo_to_zip(zf: zipfile.ZipFile, leaf_name: str,
+                              data: Optional[bytes], disk_path: Optional[str]) -> None:
+            if data is not None:
+                zf.writestr(leaf_name, data)
+            elif disk_path is not None:
+                zf.write(disk_path, arcname=leaf_name)
 
         # -------------------- Path A: single zip -----------------------
         if total_photo_bytes <= SPLIT_THRESHOLD_BYTES:
-            zip_path = os.path.join(work_dir, f"jnj-{slug}-{len(items)}items.zip")
             csv_buf = io.StringIO()
             writer = csv.DictWriter(csv_buf, fieldnames=JNJ_CSV_COLUMNS, quoting=csv.QUOTE_MINIMAL)
             writer.writeheader()
             for row, _phs in per_item_data:
                 writer.writerow(row)
+            filename = f"jnj-{slug}-{len(items)}items.zip"
+
+            if not spilled_to_disk:
+                # Fast path: build ZIP in RAM, return as one blob.
+                zip_buf = io.BytesIO()
+                with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                    zf.writestr("items.csv", csv_buf.getvalue().encode("utf-8-sig"))
+                    for _row, phs in per_item_data:
+                        for ln, data, dp, _sz in phs:
+                            _add_photo_to_zip(zf, ln, data, dp)
+                zip_bytes = zip_buf.getvalue()
+                print(f"[jnj-zip] single zip (RAM): {len(zip_bytes)/1024/1024:.1f} MB, {len(items)} items", flush=True)
+                _cleanup()  # nothing to clean, but keep the pattern
+                return Response(
+                    content=zip_bytes,
+                    media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+                )
+
+            # Disk path: write ZIP to a file, stream it back.
+            _ensure_work_dir()
+            zip_path = os.path.join(work_dir, filename)  # type: ignore[arg-type]
             with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
                 zf.writestr("items.csv", csv_buf.getvalue().encode("utf-8-sig"))
                 for _row, phs in per_item_data:
-                    for leaf_name, disk_path, _sz in phs:
-                        # zf.write() streams from disk — doesn't load the
-                        # whole file into memory.
-                        zf.write(disk_path, arcname=leaf_name)
+                    for ln, data, dp, _sz in phs:
+                        _add_photo_to_zip(zf, ln, data, dp)
             final_size = os.path.getsize(zip_path)
-            print(f"[jnj-zip] single zip: {final_size/1024/1024:.1f} MB, {len(items)} items", flush=True)
-            filename = f"jnj-{slug}-{len(items)}items.zip"
+            print(f"[jnj-zip] single zip (disk): {final_size/1024/1024:.1f} MB, {len(items)} items", flush=True)
             return _stream_zip_response(zip_path, filename, final_size, _cleanup)
 
         # -------------------- Path B: split parts ----------------------
-        # Bin-pack items sequentially by file-size on disk.
-        parts: List[List[Tuple[Dict[str, str], List[Tuple[str, str, int]]]]] = []
-        current: List[Tuple[Dict[str, str], List[Tuple[str, str, int]]]] = []
+        parts: List[List[Tuple[Dict[str, str], List[Tuple[str, Optional[bytes], Optional[str], int]]]]] = []
+        current: List[Tuple[Dict[str, str], List[Tuple[str, Optional[bytes], Optional[str], int]]]] = []
         current_bytes = 0
         for row, phs in per_item_data:
-            item_bytes = sum(sz for (_n, _p, sz) in phs)
+            item_bytes = sum(sz for (_ln, _b, _p, sz) in phs)
             if current and current_bytes + item_bytes > SPLIT_THRESHOLD_BYTES:
                 parts.append(current)
                 current = []
@@ -2891,10 +3007,13 @@ async def jnj_zip(
             parts.append(current)
 
         n_parts = len(parts)
-        print(f"[jnj-zip] SPLIT into {n_parts} parts (total {total_photo_bytes/1024/1024:.1f} MB, {len(items)} items)", flush=True)
+        print(f"[jnj-zip] SPLIT into {n_parts} parts (total {total_photo_bytes/1024/1024:.1f} MB, {len(items)} items, path={path_label})", flush=True)
 
-        # Build each part ZIP to its own file on disk.
-        part_zip_paths: List[Tuple[str, str, int]] = []  # (filename_in_wrapper, disk_path, size_bytes)
+        # Always build split parts to disk — they get wrapped into one
+        # final ZIP and streamed back. RAM path for splits would double
+        # memory unnecessarily.
+        _ensure_work_dir()
+        part_zip_paths: List[Tuple[str, str, int]] = []
         for part_idx, part_items in enumerate(parts, start=1):
             part_csv = io.StringIO()
             part_writer = csv.DictWriter(part_csv, fieldnames=JNJ_CSV_COLUMNS, quoting=csv.QUOTE_MINIMAL)
@@ -2902,17 +3021,16 @@ async def jnj_zip(
             for row, _phs in part_items:
                 part_writer.writerow(row)
             part_filename = f"jnj-{slug}-part{part_idx}of{n_parts}-{len(part_items)}items.zip"
-            part_path = os.path.join(work_dir, part_filename)
+            part_path = os.path.join(work_dir, part_filename)  # type: ignore[arg-type]
             with zipfile.ZipFile(part_path, "w", zipfile.ZIP_DEFLATED) as pzf:
                 pzf.writestr("items.csv", part_csv.getvalue().encode("utf-8-sig"))
                 for _row, phs in part_items:
-                    for leaf_name, disk_path, _sz in phs:
-                        pzf.write(disk_path, arcname=leaf_name)
+                    for ln, data, dp, _sz in phs:
+                        _add_photo_to_zip(pzf, ln, data, dp)
             part_size = os.path.getsize(part_path)
             part_zip_paths.append((part_filename, part_path, part_size))
             print(f"[jnj-zip]   part {part_idx}/{n_parts}: {part_size/1024/1024:.1f} MB, {len(part_items)} items → {part_filename}", flush=True)
 
-        # Build README.
         readme = (
             f"J&J Sale: {sale_name or '(unnamed)'}\n"
             f"Total items: {len(items)}\n"
@@ -2941,9 +3059,8 @@ async def jnj_zip(
             f"numbers stay in order across parts.\n"
         )
 
-        # Wrap the parts + README into one final download ZIP on disk.
         wrapper_filename = f"jnj-{slug}-SPLIT-into-{n_parts}parts.zip"
-        wrapper_path = os.path.join(work_dir, wrapper_filename)
+        wrapper_path = os.path.join(work_dir, wrapper_filename)  # type: ignore[arg-type]
         with zipfile.ZipFile(wrapper_path, "w", zipfile.ZIP_STORED) as wzf:
             wzf.writestr("README-upload-in-order.txt", readme.encode("utf-8"))
             for pf, pp, _ps in part_zip_paths:
@@ -2952,8 +3069,6 @@ async def jnj_zip(
         return _stream_zip_response(wrapper_path, wrapper_filename, wrapper_size, _cleanup)
 
     except Exception:
-        # If ANYTHING blew up before we returned a StreamingResponse,
-        # clean up now instead of leaking the temp dir.
         _cleanup()
         raise
 
