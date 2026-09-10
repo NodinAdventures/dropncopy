@@ -499,13 +499,13 @@ Do NOT add commentary, do NOT add a "Transcription:" header, do NOT add column l
 # v25.65: temporarily lowered 8 -> 3 while account is on OpenAI Tier 1
 # (30k TPM). 8 parallel gpt-4o high-detail calls could burst past 30k
 # tokens in one minute and trigger 429s.
-# v25.75: account is now Tier 2 (450k TPM, 15x headroom). Bumped back
-# to 8. This is the ~2.5x speedup that should have shipped weeks ago
-# once the account graduated — the cap was left at 3 by mistake. Even
-# with two parallel builds each doing 8 = 16 concurrent calls at
-# ~5k tokens each = 80k tokens/minute burst, still comfortably under
-# the 450k Tier 2 cap.
-MAX_CONCURRENT = 8
+# v25.75: bumped to 8 assuming Tier 2 headroom would help. In practice,
+# Render Standard is 1 CPU — 8 parallel calls on slow OpenAI days
+# pinned the CPU and made the entire site unresponsive to health checks.
+# v25.76: reverted to 3, matching what worked reliably for weeks. Trading
+# a small amount of good-day throughput for predictable behavior on
+# bad OpenAI days. Boring wins.
+MAX_CONCURRENT = 3
 
 
 async def _openai_with_retry(coro_factory, *, max_attempts: int = 8, op_name: str = "openai"):
