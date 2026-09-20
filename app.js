@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-09-10-concurrency-3-v25.76";
+const BUILD_ID = "2026-09-20-review-steps-v26";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v25.76 boot. BUILD_ID:", "2026-09-10-concurrency-3-v25.76");
+jnjLog("BOOT", "v26 boot. BUILD_ID:", "2026-09-20-review-steps-v26");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -1108,15 +1108,42 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v25.76 · ${BUILD_ID}`;
+  badge.textContent = `v26 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
   badge.style.pointerEvents = "auto";
   badge.style.cursor = "pointer";
-  badge.title = "Click to view debug log";
+  badge.title = "Click to view debug log — shows live load-balancer state";
   badge.addEventListener("click", () => jnjShowDebugOverlay());
   document.body.appendChild(badge);
+
+  // v25.77: live load-balancer indicator. Every 5 seconds we ask the server
+  // how many builds each OpenAI key is currently handling, and show it in
+  // the corner badge like "v25.77 · A:1 B:0". Makes the two-key routing
+  // visible during testing without opening devtools. If polling fails
+  // (server down, offline, whatever), the badge silently falls back to
+  // just the build ID — no user-facing error.
+  const LB_DIAG_URL = "__PORT_5000__".startsWith("__")
+    ? "/api/jnj-diag"
+    : "__PORT_5000__/api/jnj-diag";
+  async function jnjPollLbState() {
+    try {
+      const r = await fetch(LB_DIAG_URL, { cache: "no-store" });
+      if (!r.ok) return;
+      const j = await r.json();
+      const a = Number(j.key_a_active_builds || 0);
+      const b = Number(j.key_b_active_builds || 0);
+      const lbOn = Boolean(j.load_balancer_enabled);
+      if (lbOn) {
+        badge.textContent = `v25.77 · A:${a} B:${b}`;
+      } else {
+        badge.textContent = `v25.77 · A:${a} (single key)`;
+      }
+    } catch {}
+  }
+  jnjPollLbState();
+  setInterval(jnjPollLbState, 5000);
 } catch {}
 
 // Health-check URL for warming up the free-tier server before doing real work.
@@ -1822,7 +1849,9 @@ function jnjRenderPreview() {
   const total = jnjState.photos.size;
   const matched = total - jnjState.unmatched.length;
   const currentSale = (jnjSaleName && jnjSaleName.value ? jnjSaleName.value.trim() : "") || "(sale name not set)";
-  jnjPreviewSub.textContent = `Sale: ${currentSale} · ${jnjState.items.length} items · ${total} photos · ${matched} matched, ${jnjState.unmatched.length} unmatched. Drag photos between items to fix, or click Retry.`;
+  // v26: the summary line now names both review steps instead of only the
+  // photo drag, because the text is fully editable here too.
+  jnjPreviewSub.textContent = `Sale: ${currentSale} · ${jnjState.items.length} items · ${total} photos · ${matched} matched, ${jnjState.unmatched.length} in the tray. Fix the typed text by clicking it, fix the photos by dragging them.`;
 
   // Restore preference values into fields (only if empty, so we don't clobber user edits)
   jnjRestorePrefs();
@@ -1960,9 +1989,12 @@ function jnjRenderPreview() {
     const sellerHtml = `<span class="seller-pill seller-pill-editable" contenteditable="true" spellcheck="false" data-field="sheet_seller_num" title="Seller # from the boxed number on the sheet — tap to fix">SELLER ${escapeHtml(it.sheet_seller_num || "?")}</span>`;
     // v25.73: lookup by _row_key (unique) instead of item_num (may repeat).
     const photos = jnjState.itemPhotos[it._row_key] || [];
+    // v26: position 0 is the MAIN photo (the cover image on the auction
+    // listing). Thumbs are rendered with their index so the first one can
+    // carry a MAIN tag and so drag-reorder can compute insert positions.
     const photosHtml = photos.length
-      ? photos.map(fname => jnjPhotoThumbHtml(fname)).join("")
-      : `<div class="jnj-item-photos empty">no photo</div>`;
+      ? photos.map((fname, pIdx) => jnjPhotoThumbHtml(fname, false, pIdx)).join("")
+      : `<div class="jnj-photo-empty">no photo</div>`;
 
     // Determine badge from first photo (if any)
     let badgeHtml = "";
@@ -1984,12 +2016,16 @@ function jnjRenderPreview() {
           ${sellerHtml}
           <span class="jnj-meta-label">Location:</span> ${lotHtml}
         </div>
-        <div class="jnj-item-desc-text"><span contenteditable="true" spellcheck="false" data-field="description" title="Tap to fix description" style="cursor:text;">${escapeHtml(it.description)}</span></div>
+        <div class="jnj-item-desc-text"><span class="jnj-desc-edit" contenteditable="true" spellcheck="true" data-field="description" title="Tap to fix description — misspelled words get a red squiggle, right-click for suggestions" style="cursor:text;">${escapeHtml(it.description)}</span></div>
       </div>
       <div class="jnj-item-actions">
         ${badgeHtml}
         <div class="jnj-item-photos">${photosHtml}</div>
-        <button class="jnj-retry-btn" data-item="${escapeAttr(it.item_num)}">↻ Retry match</button>
+        <div class="jnj-item-photo-tools">
+          <button type="button" class="jnj-add-photo-btn" title="Add a photo from your computer straight onto this lot. It is attached to this lot only — no AI matching, nothing else moves.">+ Add photo</button>
+          <input type="file" class="jnj-add-photo-input" accept="image/*,.heic,.heif" multiple hidden />
+          <button class="jnj-retry-btn" data-item="${escapeAttr(it.item_num)}">↻ Retry match</button>
+        </div>
       </div>
     `;
     jnjItemsList.appendChild(card);
@@ -2021,21 +2057,57 @@ function jnjRenderPreview() {
       });
     });
 
+    // v26: "+ Add photo" — attach a file from the operator's computer or phone
+    // directly to THIS lot. Deliberately does not run photo matching: Drop N
+    // Copy slices the uploaded photo stream by QR divider position, so pushing
+    // a stray file into that stream would shift other lots. A photo added here
+    // only ever touches the lot it was dropped on.
+    const addBtn = card.querySelector(".jnj-add-photo-btn");
+    const addInput = card.querySelector(".jnj-add-photo-input");
+    if (addBtn && addInput) {
+      addBtn.addEventListener("click", () => addInput.click());
+      addInput.addEventListener("change", async (e) => {
+        const files = Array.from(e.target.files || []);
+        addInput.value = "";
+        await jnjAddExternalPhotos(files, it._row_key);
+      });
+    }
+
     // Drag targets
     card.addEventListener("dragover", (e) => {
-      if (e.dataTransfer.types.includes("application/x-jnj-photo")) {
+      const types = e.dataTransfer.types;
+      if (types.includes("application/x-jnj-photo")) {
         e.preventDefault();
         card.classList.add("drag-over");
+      } else if (types.includes("Files")) {
+        // v26: a real file being dragged in from Finder / File Explorer.
+        e.preventDefault();
+        e.stopPropagation();
+        card.classList.add("drag-over-file");
       }
     });
-    card.addEventListener("dragleave", () => card.classList.remove("drag-over"));
-    card.addEventListener("drop", (e) => {
-      if (!e.dataTransfer.types.includes("application/x-jnj-photo")) return;
-      e.preventDefault();
+    card.addEventListener("dragleave", () => {
       card.classList.remove("drag-over");
-      const fname = e.dataTransfer.getData("application/x-jnj-photo");
-      // v25.73: pass the unique row key instead of item_num.
-      jnjMovePhotoTo(fname, it._row_key);
+      card.classList.remove("drag-over-file");
+    });
+    card.addEventListener("drop", async (e) => {
+      const types = e.dataTransfer.types;
+      if (types.includes("application/x-jnj-photo")) {
+        e.preventDefault();
+        card.classList.remove("drag-over");
+        const fname = e.dataTransfer.getData("application/x-jnj-photo");
+        // v25.73: pass the unique row key instead of item_num.
+        jnjMovePhotoTo(fname, it._row_key);
+        return;
+      }
+      if (types.includes("Files")) {
+        // v26: outside file dropped straight onto this lot.
+        e.preventDefault();
+        e.stopPropagation();
+        card.classList.remove("drag-over-file");
+        const files = Array.from((e.dataTransfer.files) || []);
+        await jnjAddExternalPhotos(files, it._row_key);
+      }
     });
     // Retry button
     card.querySelector(".jnj-retry-btn").addEventListener("click", () => jnjRetryMatch(it._row_key));
@@ -2132,6 +2204,51 @@ function jnjRenderPreview() {
       el.classList.add("dragging");
     });
     el.addEventListener("dragend", () => el.classList.remove("dragging"));
+
+    // v26: dropping one thumbnail ON another inserts it at that position
+    // instead of appending to the end of the lot. Drop a photo on the first
+    // thumbnail to make it the MAIN photo. Works inside one lot (reorder) and
+    // across lots (move to a chosen position). stopPropagation keeps the card
+    // handler from also firing and appending it to the end.
+    el.addEventListener("dragover", (e) => {
+      if (!e.dataTransfer.types.includes("application/x-jnj-photo")) return;
+      e.preventDefault();
+      e.stopPropagation();
+      el.classList.add("insert-before");
+    });
+    el.addEventListener("dragleave", () => el.classList.remove("insert-before"));
+    el.addEventListener("drop", (e) => {
+      if (!e.dataTransfer.types.includes("application/x-jnj-photo")) return;
+      e.preventDefault();
+      e.stopPropagation();
+      el.classList.remove("insert-before");
+      const dragged = e.dataTransfer.getData("application/x-jnj-photo");
+      const targetFname = el.dataset.filename;
+      if (!dragged || dragged === targetFname) return;
+      // Which lot does the thumbnail we dropped on belong to?
+      const hostCard = el.closest(".jnj-item-card");
+      if (!hostCard) {
+        // Dropped onto a thumbnail in the tray — treat it as unassigning.
+        jnjMovePhotoTo(dragged, null);
+        return;
+      }
+      const hostRowKey = hostCard.dataset.rowKey || hostCard.dataset.itemNum;
+      jnjMovePhotoTo(dragged, hostRowKey, targetFname);
+    });
+    // v26: ★ make-this-the-main-photo button (touch fallback for dragging).
+    const mainBtn = el.querySelector(".jnj-photo-main-btn");
+    if (mainBtn) mainBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const hostCard = el.closest(".jnj-item-card");
+      if (!hostCard) return;
+      const rowKey = hostCard.dataset.rowKey || hostCard.dataset.itemNum;
+      const bucket = jnjState.itemPhotos[rowKey] || [];
+      const firstFname = bucket[0];
+      if (!firstFname || firstFname === el.dataset.filename) return;
+      jnjMovePhotoTo(el.dataset.filename, rowKey, firstFname);
+      toast("That is now the MAIN photo for this lot.");
+    });
+
     // Remove-photo button (X)
     const rm = el.querySelector(".jnj-photo-remove");
     if (rm) rm.addEventListener("click", (e) => {
@@ -2141,16 +2258,106 @@ function jnjRenderPreview() {
   });
 }
 
-function jnjPhotoThumbHtml(fname, isUnmatched = false) {
+function jnjPhotoThumbHtml(fname, isUnmatched = false, pIdx = -1) {
   const info = jnjState.photos.get(fname);
   if (!info) return "";
   const selected = jnjSelectedPhoto === fname ? " selected" : "";
-  const cls = (isUnmatched ? "jnj-photo-thumb unmatched" : "jnj-photo-thumb") + selected;
+  const added = info.added_manually ? " added" : "";
+  const cls = (isUnmatched ? "jnj-photo-thumb unmatched" : "jnj-photo-thumb") + selected + added;
   const tagBadge = info.tag_read ? ` title="Tag: ${escapeAttr(info.tag_read)}"` : (info.description_read ? ` title="${escapeAttr(info.description_read)}"` : "");
-  return `<div class="${cls}" data-filename="${escapeAttr(fname)}"${tagBadge}>
-    <img src="${info.thumb}" alt="" />
-    <button class="jnj-photo-remove" title="Remove">×</button>
+  // v26: position 0 in a lot is the MAIN photo — the cover image J&J shows on
+  // the listing. Tag it so the operator can see at a glance which one it is,
+  // and drag it to reorder. No "make main" menu: first photo wins, always.
+  const mainTag = (!isUnmatched && pIdx === 0) ? `<span class="jnj-photo-main-tag">MAIN</span>` : "";
+  // v26: touch screens cannot drag, so every photo after the first also gets a
+  // star button that moves it to the front (making it the MAIN photo). It only
+  // shows on touch devices — on a mouse, dragging is the way.
+  const promoteBtn = (!isUnmatched && pIdx > 0)
+    ? `<button class="jnj-photo-main-btn" title="Make this the MAIN photo">★</button>`
+    : "";
+  const posAttr = pIdx >= 0 ? ` data-pos="${pIdx}"` : "";
+  // v26: HEIC files often cannot be decoded by Chrome, so a thumbnail may be
+  // missing. The file still exports fine — show a readable placeholder rather
+  // than a broken image icon.
+  const imgHtml = info.thumb
+    ? `<img src="${info.thumb}" alt="" />`
+    : `<div class="jnj-photo-noprev" title="${escapeAttr(fname)}">no preview</div>`;
+  return `<div class="${cls}" data-filename="${escapeAttr(fname)}"${posAttr}${tagBadge}>
+    ${imgHtml}
+    ${mainTag}
+    ${promoteBtn}
+    <button class="jnj-photo-remove" title="Remove from this lot (goes to the tray at the top)">×</button>
   </div>`;
+}
+
+/* =========================================================
+   v26 · Add a photo from outside the original upload
+   ---------------------------------------------------------
+   Drop N Copy matches photos by walking the uploaded stream and cutting it at
+   QR divider cards. It is not looking at the pictures. So the only safe way to
+   add a missed photo is to attach it to one specific lot and leave the stream
+   alone — which is exactly what this does.
+
+   The file is kept in the browser (same as every other photo in the sale) and
+   is uploaded with the rest at Download ZIP time. No new server route, no AI
+   call, no cost.
+   ========================================================= */
+async function jnjAddExternalPhotos(files, rowKey) {
+  if (!jnjState) return;
+  const usable = (files || []).filter(isUsablePhoto);
+  const skipped = (files || []).length - usable.length;
+  if (usable.length === 0) {
+    if (skipped > 0) toast(`That file is not an image — nothing added.`);
+    return;
+  }
+  const item = jnjState.items.find(i => i._row_key === rowKey);
+  if (!item) { toast("Could not find that lot — nothing added."); return; }
+  if (jnjState.itemPhotos[rowKey] === undefined) jnjState.itemPhotos[rowKey] = [];
+
+  let addedCount = 0;
+  for (const f of usable) {
+    // Unique in-sale filename. Keeps the extension so the server-side ZIP
+    // builder recognises it, and keeps a timestamp so two files with the same
+    // name from different folders cannot collide.
+    const extMatch = (f.name || "").match(/\.([A-Za-z0-9]+)$/);
+    const ext = extMatch ? extMatch[1].toLowerCase() : "jpg";
+    const stamp = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+    const fname = `added-${stamp}.${ext}`;
+
+    let thumb = "";
+    try {
+      thumb = URL.createObjectURL(f);
+    } catch (err) {
+      jnjLog("ADD-PHOTO-THUMB-ERR", err);
+    }
+
+    jnjState.photos.set(fname, {
+      id: fname,
+      file: f,
+      thumb,
+      tag_read: "",
+      description_read: `Added by hand: ${f.name || fname}`,
+      item_num_match: item.item_num,
+      row_key_match: rowKey,
+      match_kind: "manual",
+      dhash: "",
+      is_blank: false,
+      added_manually: true,
+      original_name: f.name || fname,
+    });
+    jnjState.itemPhotos[rowKey].push(fname);
+    addedCount++;
+    jnjLog("ADD-PHOTO", `"${f.name}" -> lot ${item.item_num} (row_key=${rowKey}) as ${fname}, ${(f.size/1024).toFixed(0)} KB`);
+  }
+
+  jnjRenderPreview();
+  const pos = jnjState.itemPhotos[rowKey].length;
+  if (addedCount === 1 && pos === 1) {
+    toast(`Added to lot ${item.item_num}. It is the only photo, so it is the MAIN photo.`);
+  } else {
+    toast(`Added ${addedCount} photo${addedCount === 1 ? "" : "s"} to lot ${item.item_num}. Drag to the front to make one the MAIN photo.`);
+  }
+  if (skipped > 0) toast(`Skipped ${skipped} file${skipped === 1 ? "" : "s"} that were not images.`);
 }
 
 // Mobile tap-to-assign: tap a photo to select it, tap an item card to assign.
@@ -2194,8 +2401,15 @@ document.addEventListener("click", (e) => {
 // v25.73: `target` is now a _row_key (unique) rather than item_num.
 // Callers pass it.item_num pre-25.73 or it._row_key from 25.73 on;
 // we resolve either one to the correct bucket for backward compatibility.
-function jnjMovePhotoTo(fname, target) {
+// v26: optional third argument `beforeFname`. When present the photo is
+// inserted directly BEFORE that filename inside the target lot instead of
+// being appended. This is what makes drag-to-reorder work, and reordering is
+// how the operator picks the MAIN photo — position 0 is always the main one.
+// The ZIP builder numbers photos in this same array order, so the order shown
+// on screen is the order J&J receives.
+function jnjMovePhotoTo(fname, target, beforeFname = null) {
   if (!jnjState) return;
+  if (beforeFname === fname) beforeFname = null; // dropped on itself
   // Remove from wherever it currently is
   for (const key of Object.keys(jnjState.itemPhotos)) {
     jnjState.itemPhotos[key] = jnjState.itemPhotos[key].filter(f => f !== fname);
@@ -2216,7 +2430,14 @@ function jnjMovePhotoTo(fname, target) {
       if (matchedItem) bucketKey = matchedItem._row_key;
     }
     if (bucketKey && jnjState.itemPhotos[bucketKey] !== undefined) {
-      jnjState.itemPhotos[bucketKey].push(fname);
+      const bucket = jnjState.itemPhotos[bucketKey];
+      const at = beforeFname ? bucket.indexOf(beforeFname) : -1;
+      if (at >= 0) {
+        bucket.splice(at, 0, fname);
+        if (at === 0) jnjLog("MAIN-PHOTO", `${fname} is now the MAIN photo for row_key=${bucketKey}`);
+      } else {
+        bucket.push(fname);
+      }
       const info = jnjState.photos.get(fname);
       if (info) {
         info.item_num_match = matchedItem ? matchedItem.item_num : "";
@@ -2280,6 +2501,33 @@ async function jnjDownloadZip() {
   const sellerStart = parseInt(jnjSellerStart.value.trim() || "1000", 10);
   if (!saleName) { toast("Please enter the Category / Sale name."); jnjSaleName.focus(); return; }
   if (!sellerId) { toast("Please enter the Seller ID prefix."); jnjSellerId.focus(); return; }
+
+  // v26: confirm the sale name before building. The field keeps its previous
+  // value between sales, so it is easy to build a whole sale under last week's
+  // name and not notice until it is uploaded. Show the name that is about to be
+  // used and let it be fixed here instead of rebuilding the sale afterwards.
+  const unmatchedCount = (jnjState.unmatched || []).length;
+  const confirmLines = [
+    `Build this sale as:`,
+    ``,
+    `    ${saleName}`,
+    ``,
+    `${jnjState.items.length} lots · Seller ID ${sellerId}`,
+  ];
+  if (unmatchedCount > 0) {
+    confirmLines.push(
+      ``,
+      `${unmatchedCount} photo${unmatchedCount === 1 ? "" : "s"} in the tray will NOT be included.`,
+      `Move any you want into a lot first.`
+    );
+  }
+  confirmLines.push(``, `OK to build, or Cancel to fix the name.`);
+  if (!confirm(confirmLines.join("\n"))) {
+    jnjSaleName.focus();
+    jnjSaleName.select();
+    toast("Build cancelled — fix the sale name and try again.");
+    return;
+  }
 
   jnjSavePrefs();
 

@@ -141,9 +141,16 @@
           <input id="jnjSellerStart" type="number" placeholder="1000" />
         </label>
         <label class="jnj-field jnj-field-photos">
-          <span>Unmatched photos</span>
+          <span>Photo tray &mdash; unmatched &amp; removed <em class="jnj-tray-warn">(these are NOT included in the sale)</em></span>
           <div class="jnj-unmatched" id="jnjUnmatched"><em>none</em></div>
         </label>
+      </div>
+      <!-- v26: plain-language review instructions. Both review steps happen on
+           this one screen: fix the typed text, then fix the photos. -->
+      <div class="jnj-review-help">
+        <div class="jnj-review-help-row"><strong>1. Check the text.</strong> Click any lot number, seller, location, or description and retype it. Misspelled words get a red squiggle &mdash; right-click for suggestions, or right-click &rarr; Add to dictionary for brand names like FARBERWARE.</div>
+        <div class="jnj-review-help-row"><strong>2. Check the photos.</strong> The first photo in a lot is the <span class="jnj-photo-main-tag inline">MAIN</span> photo. Drag a photo to the front to make it the main one, drag it to another lot to move it, click &times; to send it to the tray, or use <strong>+ Add photo</strong> to attach a photo straight from your computer to that one lot.</div>
+        <div class="jnj-review-help-row"><strong>3. Download ZIP</strong> when the text and photos both look right.</div>
       </div>
       <div id="jnjItemsList" class="jnj-items-list"></div>
       <!-- Bottom download bar so Dave doesn't have to scroll back up to find

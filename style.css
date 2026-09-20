@@ -1270,3 +1270,221 @@ body {
 .jnj-match-badge.manual { background: #dbeafe; color: #1e40af; }
 .jnj-match-badge.none { background: #fee2e2; color: #991b1b; }
 
+
+/* =========================================================
+   v26 · Review-step styles
+   Two review checkpoints live on the existing preview screen:
+   text review (editable fields + spellcheck) and photo review
+   (main-photo tag, drag reorder, per-lot add, removed tray).
+   ========================================================= */
+
+/* --- Plain-language instructions above the item list --- */
+.jnj-review-help {
+  margin: 14px 0 18px;
+  padding: 14px 16px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-dim);
+}
+.jnj-review-help-row + .jnj-review-help-row { margin-top: 8px; }
+.jnj-review-help strong { color: var(--text); }
+
+/* --- Text review: description field carries browser spellcheck --- */
+.jnj-desc-edit {
+  cursor: text;
+  border-radius: 4px;
+  padding: 1px 3px;
+  margin: -1px -3px;
+  transition: background-color 120ms, box-shadow 120ms;
+}
+.jnj-desc-edit:hover { background: rgba(139, 124, 246, 0.08); }
+.jnj-desc-edit:focus {
+  outline: none;
+  background: var(--surface-2);
+  box-shadow: 0 0 0 2px var(--accent-soft), 0 0 0 1px var(--accent);
+}
+
+/* --- Photo review: MAIN tag on position 0 --- */
+.jnj-photo-main-tag {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: rgba(139, 124, 246, 0.92);
+  color: #fff;
+  font-family: var(--font-mono);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-align: center;
+  padding: 2px 0;
+  pointer-events: none;
+}
+/* Inline version used inside the instructions text. */
+.jnj-photo-main-tag.inline {
+  position: static;
+  display: inline-block;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 9px;
+  vertical-align: middle;
+}
+
+/* --- Drag-to-reorder insert marker --- */
+.jnj-photo-thumb.insert-before {
+  border-color: var(--accent);
+  box-shadow: -4px 0 0 0 var(--accent);
+  transform: translateX(3px);
+}
+
+/* --- Photos added by hand get a quiet green edge --- */
+.jnj-photo-thumb.added { border-color: var(--success); }
+
+/* --- HEIC and other files the browser cannot preview --- */
+.jnj-photo-noprev {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  font-size: 9px;
+  line-height: 1.2;
+  color: var(--text-mute);
+  background: var(--surface-2);
+  padding: 2px;
+}
+
+/* --- "no photo" placeholder (renamed in v26 so it no longer collides with
+       the .jnj-item-photos flex container) --- */
+.jnj-photo-empty {
+  padding: 0 12px;
+  color: var(--text-mute);
+  font-size: 11px;
+  font-style: italic;
+}
+
+/* --- Per-lot photo tools --- */
+.jnj-item-photo-tools {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.jnj-add-photo-btn {
+  padding: 4px 10px;
+  font-size: 11px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  color: var(--accent-hover);
+  cursor: pointer;
+  font-family: inherit;
+  white-space: nowrap;
+}
+.jnj-add-photo-btn:hover { background: rgba(139, 124, 246, 0.22); }
+
+/* --- A real file being dragged in from Finder / File Explorer --- */
+.jnj-item-card.drag-over-file {
+  border-color: var(--success);
+  box-shadow: 0 0 0 2px rgba(74, 222, 128, 0.25);
+  background: rgba(74, 222, 128, 0.06);
+}
+.jnj-item-card.drag-over-file::after {
+  content: "Drop photo onto this lot";
+  position: absolute;
+  top: 6px;
+  right: 10px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--success);
+  pointer-events: none;
+}
+.jnj-item-card { position: relative; }
+
+/* --- Tray warning label --- */
+.jnj-tray-warn {
+  font-style: normal;
+  font-size: 10px;
+  color: var(--warn);
+  letter-spacing: 0.02em;
+}
+
+/* --- Touch devices have no hover, so the remove button must always show --- */
+@media (hover: none), (pointer: coarse) {
+  .jnj-photo-remove { display: block; }
+}
+
+/* --- ★ make-main button: touch-only, since dragging needs a mouse --- */
+.jnj-photo-main-btn {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.6);
+  color: var(--accent-hover);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  display: none;
+}
+.jnj-photo-thumb:hover .jnj-photo-main-btn { display: block; }
+@media (hover: none), (pointer: coarse) {
+  .jnj-photo-main-btn { display: block; }
+}
+
+/* =========================================================
+   v26 · Narrow-screen review layout
+   The item card was a fixed three-column grid (60px / min 320px / photos),
+   which is wider than a phone screen and pushed the photos and the buttons
+   off the right edge. Below 760px the card stacks instead, so the text and
+   every photo control stay reachable on a phone or a small tablet.
+   ========================================================= */
+@media (max-width: 760px) {
+  .jnj-item-card {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+  .jnj-item-num {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+  }
+  .jnj-item-actions { align-items: flex-start; }
+  .jnj-item-photos { justify-content: flex-start; }
+  .jnj-item-card.drag-over-file::after {
+    position: static;
+    display: block;
+    margin-top: 4px;
+  }
+  .jnj-add-photo-btn, .jnj-retry-btn { padding: 7px 12px; font-size: 12px; }
+  .jnj-review-help { font-size: 12px; }
+}
+
+/* --- Narrow screens: the sticky preview header stacked instead of squeezed.
+       Side by side it crushed the sale summary into a one-word-per-line
+       column and made the sticky bar tall enough to cover the first sheet
+       header underneath it. --- */
+@media (max-width: 760px) {
+  .jnj-preview-head {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+    padding: 10px 4px;
+  }
+  .jnj-preview-head h2 { margin: 0 0 4px; font-size: 17px; }
+  .jnj-preview-sub { font-size: 12px; line-height: 1.45; }
+  .jnj-preview-actions { display: flex; gap: 8px; }
+  .jnj-preview-actions button { flex: 1; }
+  .jnj-sheet-header { flex-direction: column; align-items: flex-start; }
+  .jnj-renumber-btn { width: 100%; }
+}
