@@ -1084,6 +1084,91 @@ function isUsablePhoto(f) {
   return /\.(jpe?g|png|heic|heif|webp|gif|bmp|tiff?)$/i.test(name);
 }
 
+function isZipFile(f) {
+  if (!f) return false;
+  const name = (f.name || "").toLowerCase();
+  const type = (f.type || "").toLowerCase();
+  return name.endsWith(".zip") || type === "application/zip" || type === "application/x-zip-compressed";
+}
+
+/* -------------------- v26: Zip expansion for photo archives --------------
+   When Dave drops (or picks) a .zip that contains photos, we unpack it in
+   the browser via JSZip and return the photos as regular File objects so
+   the rest of the pipeline treats them like any other drop.
+   Notes:
+   - Sheets (PDF) inside a zip are extracted too and returned in .sheets
+   - Non-image / non-pdf entries are silently skipped
+   - macOS __MACOSX/ metadata folders and .DS_Store are skipped
+   - Nested folders inside the zip are walked (relativePath preserved as name)
+   - If JSZip failed to load (offline), returns null and caller shows a toast */
+async function jnjExpandZip(zipFile) {
+  if (typeof JSZip === "undefined") return null;
+  try {
+    const jz = await JSZip.loadAsync(zipFile);
+    const photos = [];
+    const sheets = [];
+    const entries = Object.values(jz.files);
+    for (const entry of entries) {
+      if (entry.dir) continue;
+      const path = entry.name || "";
+      // Skip macOS metadata folders and hidden junk
+      if (path.startsWith("__MACOSX/") || path.includes("/.DS_Store") || path.endsWith("/.DS_Store") || path === ".DS_Store") continue;
+      const leaf = path.split("/").pop() || path;
+      if (leaf.startsWith(".") || leaf.toLowerCase() === "thumbs.db" || leaf.toLowerCase() === "desktop.ini") continue;
+      const lower = leaf.toLowerCase();
+      const isPdf = lower.endsWith(".pdf");
+      const isImg = /\.(jpe?g|png|heic|heif|webp|gif|bmp|tiff?)$/i.test(lower);
+      if (!isPdf && !isImg) continue;
+      // Extract as Blob and wrap in a File so downstream code has .name/.size/.type
+      const blob = await entry.async("blob");
+      if (!blob.size) continue;
+      // Best-effort mime type
+      let mime = blob.type || "";
+      if (!mime) {
+        if (isPdf) mime = "application/pdf";
+        else if (/\.jpe?g$/i.test(lower)) mime = "image/jpeg";
+        else if (/\.png$/i.test(lower)) mime = "image/png";
+        else if (/\.heic$/i.test(lower)) mime = "image/heic";
+        else if (/\.heif$/i.test(lower)) mime = "image/heif";
+        else if (/\.webp$/i.test(lower)) mime = "image/webp";
+        else if (/\.gif$/i.test(lower)) mime = "image/gif";
+        else if (/\.bmp$/i.test(lower)) mime = "image/bmp";
+        else if (/\.tiff?$/i.test(lower)) mime = "image/tiff";
+      }
+      const file = new File([blob], leaf, { type: mime, lastModified: (entry.date && entry.date.getTime()) || Date.now() });
+      if (isPdf) sheets.push(file);
+      else photos.push(file);
+    }
+    return { photos, sheets };
+  } catch (err) {
+    console.warn("Failed to unzip", zipFile.name, err);
+    return null;
+  }
+}
+
+/* -------------------- v26: Split incoming file list; expand any zips ----- */
+async function jnjExpandFileListZips(files) {
+  const out = [];
+  const zipReports = [];
+  for (const f of files) {
+    if (isZipFile(f)) {
+      const expanded = await jnjExpandZip(f);
+      if (!expanded) {
+        zipReports.push({ name: f.name, ok: false });
+        continue;
+      }
+      // Push extracted photos + sheets as first-class files so the caller's
+      // existing PDF-vs-image split logic classifies them normally.
+      for (const p of expanded.photos) out.push(p);
+      for (const s of expanded.sheets) out.push(s);
+      zipReports.push({ name: f.name, ok: true, photos: expanded.photos.length, sheets: expanded.sheets.length });
+    } else {
+      out.push(f);
+    }
+  }
+  return { files: out, zipReports };
+}
+
 // Staged files live here until the user taps Build.
 // v23: jnjStaged.sheets is now an ARRAY so Dave can stage multiple hand-drawn
 // intake sheets in one batch. Each sheet gets its own boxed seller # applied
@@ -1201,10 +1286,34 @@ jnjSheetInput.addEventListener("change", (e) => {
   jnjSheetInput.value = "";
 });
 
-function jnjIngestPhotos(fileList) {
+async function jnjIngestPhotos(fileList) {
   const raw = Array.from(fileList || []);
-  const kept = raw.filter(isUsablePhoto);
-  const dropped = raw.length - kept.length;
+  // v26: if any of the picked files is a .zip, unpack it first so its
+  // inside photos become first-class Files staged for build.
+  const hasZip = raw.some(isZipFile);
+  let working = raw;
+  let zipReports = [];
+  if (hasZip) {
+    if (typeof JSZip === "undefined") {
+      toast("Can't unzip — offline or blocked. Please unzip on your computer first.");
+      return;
+    }
+    toast("Unzipping…");
+    const expanded = await jnjExpandFileListZips(raw);
+    working = expanded.files;
+    zipReports = expanded.zipReports;
+    // Also stage any PDF sheets found inside the zip.
+    for (const f of working) {
+      const isPdf = (f.name || "").toLowerCase().endsWith(".pdf") || f.type === "application/pdf";
+      if (isPdf) {
+        if (!jnjStaged.sheets.some(s => s.name === f.name && s.size === f.size)) {
+          jnjStaged.sheets.push(f);
+        }
+      }
+    }
+  }
+  const kept = working.filter(isUsablePhoto);
+  const dropped = working.length - kept.length - working.filter(f => (f.name||"").toLowerCase().endsWith(".pdf")).length;
   for (const f of kept) {
     // Avoid duplicates by name+size
     if (!jnjStaged.photos.some(p => p.name === f.name && p.size === f.size)) {
@@ -1212,13 +1321,27 @@ function jnjIngestPhotos(fileList) {
     }
   }
   jnjRenderStaged();
-  if (dropped > 0) {
+  if (zipReports.length) {
+    const okZips = zipReports.filter(r => r.ok);
+    const badZips = zipReports.filter(r => !r.ok);
+    const parts = [];
+    if (okZips.length) {
+      const totalPhotos = okZips.reduce((s, r) => s + r.photos, 0);
+      const totalSheets = okZips.reduce((s, r) => s + r.sheets, 0);
+      parts.push(`Unzipped ${okZips.length} archive${okZips.length===1?"":"s"} — ${totalPhotos} photo${totalPhotos===1?"":"s"}${totalSheets ? `, ${totalSheets} sheet${totalSheets===1?"":"s"}` : ""}.`);
+    }
+    if (badZips.length) {
+      parts.push(`Couldn't open ${badZips.length} zip${badZips.length===1?"":"s"}: ${badZips.map(r => r.name).join(", ")}`);
+    }
+    if (dropped > 0) parts.push(`Skipped ${dropped} non-image file${dropped===1?"":"s"}.`);
+    toast(parts.join(" "));
+  } else if (dropped > 0) {
     toast(`Added ${kept.length} photos (skipped ${dropped} non-image or empty file${dropped === 1 ? "" : "s"}).`);
   }
 }
 
-jnjPhotosInput.addEventListener("change", (e) => {
-  jnjIngestPhotos(e.target.files);
+jnjPhotosInput.addEventListener("change", async (e) => {
+  await jnjIngestPhotos(e.target.files);
   jnjPhotosInput.value = "";
 });
 
@@ -1326,8 +1449,22 @@ jnjDropZone.addEventListener("drop", async (e) => {
   for (const entry of entriesFirst) {
     await walkEntry(entry, collected);
   }
-  const files = usedEntryApi ? collected : fallbackFiles;
+  let files = usedEntryApi ? collected : fallbackFiles;
   if (!files.length) return;
+
+  // v26: expand any .zip archives inline before classification, so photos
+  // and sheets packed in a zip land in the right buckets automatically.
+  let zipReports = [];
+  if (files.some(isZipFile)) {
+    if (typeof JSZip === "undefined") {
+      toast("Can't unzip — offline or blocked. Please unzip on your computer first.");
+      return;
+    }
+    toast("Unzipping…");
+    const expanded = await jnjExpandFileListZips(files);
+    files = expanded.files;
+    zipReports = expanded.zipReports;
+  }
 
   let droppedCount = 0;
   for (const f of files) {
@@ -1350,7 +1487,17 @@ jnjDropZone.addEventListener("drop", async (e) => {
   // Always confirm how many photos landed — makes silent losses obvious.
   const total = files.length;
   const staged = jnjStaged.photos.length;
-  const summary = `Received ${total} file${total === 1 ? "" : "s"}, staged ${staged} photo${staged === 1 ? "" : "s"}${droppedCount > 0 ? `, skipped ${droppedCount} non-image` : ""}.`;
+  let summary = `Received ${total} file${total === 1 ? "" : "s"}, staged ${staged} photo${staged === 1 ? "" : "s"}${droppedCount > 0 ? `, skipped ${droppedCount} non-image` : ""}.`;
+  if (zipReports.length) {
+    const okZips = zipReports.filter(r => r.ok);
+    const badZips = zipReports.filter(r => !r.ok);
+    if (okZips.length) {
+      summary = `Unzipped ${okZips.length} archive${okZips.length===1?"":"s"}. ` + summary;
+    }
+    if (badZips.length) {
+      summary += ` Couldn't open: ${badZips.map(r => r.name).join(", ")}.`;
+    }
+  }
   toast(summary);
 });
 

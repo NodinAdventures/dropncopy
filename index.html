@@ -117,9 +117,9 @@
           <div class="drop-box-sub">Sheet + photos → import-ready zip</div>
         </div>
         <div id="jnjDropZone" class="dropzone dropzone-jnj" aria-label="Stage sheet and photos for JnJ Sale Builder" style="display:block;position:relative;">
-          <input id="jnjFileInput" type="file" multiple accept=".pdf,image/*" hidden />
+          <input id="jnjFileInput" type="file" multiple accept=".pdf,.zip,image/*" hidden />
           <input id="jnjSheetInput" type="file" multiple accept=".pdf,image/*" hidden />
-          <input id="jnjPhotosInput" type="file" multiple accept="image/*" hidden />
+          <input id="jnjPhotosInput" type="file" multiple accept=".zip,image/*" hidden />
           <div class="dropzone-inner" id="jnjDropInner">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <rect x="3" y="3" width="7" height="7" rx="1" />
@@ -224,6 +224,10 @@
 <!-- Toast -->
 <div id="toast" class="toast" role="status"></div>
 
+<!-- v26: JSZip for client-side unzip of dropped photo archives.
+     CDN pin at 3.10.1 (stable, ~40kb gzipped). If offline, drops with zip
+     files will just get skipped with a toast — doesn't break anything. -->
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
