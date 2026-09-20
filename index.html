@@ -11,6 +11,37 @@
 </head>
 <body>
 
+<!-- ============ SMALL-SCREEN BLOCK (v26) ============
+     Drop N Copy is used in the shop on desktops and laptops. Phones and
+     small tablets can't render the review grids usefully (drag targets
+     too small, table too wide to see many rows at once). Rather than
+     ship a half-broken mobile view, we show a friendly stop screen if
+     the viewport is under 1024px wide. The 1024px threshold lets iPad
+     landscape and every real laptop through; phones and portrait iPads
+     get the message. Toggle is done in app.js on load + on resize. -->
+<div id="smallScreenBlock" class="small-screen-block" style="display:none;">
+  <div class="small-screen-inner">
+    <div class="small-screen-icon" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="4" width="18" height="12" rx="2" />
+        <line x1="8" y1="20" x2="16" y2="20" />
+        <line x1="12" y1="16" x2="12" y2="20" />
+      </svg>
+    </div>
+    <h1>Drop N Copy works best on a computer</h1>
+    <p>
+      This tool is built for desktop and laptop screens where you can
+      see many lots at once and use a mouse for drag and drop.
+    </p>
+    <p class="small-screen-cta">
+      Please open this page on a computer.
+    </p>
+    <p class="small-screen-contact">
+      Questions? Text Ashley at <a href="sms:+12316553407">231-655-3407</a>.
+    </p>
+  </div>
+</div>
+
 <!-- ============ LOCK SCREEN ============ -->
 <div id="lockScreen" class="lock-screen">
   <div class="lock-card">
@@ -27,6 +58,10 @@
       <button type="submit">Unlock</button>
     </form>
     <p id="lockError" class="lock-error" role="alert"></p>
+    <!-- v26: not-completely-obvious warning per Ashley. Small, muted, sits
+         under the Unlock button so it's there if you read it but doesn't
+         steal attention. -->
+    <p class="lock-computer-note">Works best on a computer. Phones and small tablets are not supported.</p>
   </div>
 </div>
 

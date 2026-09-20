@@ -13,6 +13,7 @@ import json
 import re
 import shutil
 import tempfile
+import time
 import uuid
 import zipfile
 from datetime import datetime
@@ -233,19 +234,114 @@ async def stylecss():
 # it here and pass it in ourselves. We also strip whitespace / quotes in case
 # the value was pasted with any extras.
 _OPENAI_KEY = (os.environ.get("OPENAI_API_KEY") or "").strip().strip('"').strip("'")
+# v25.77: read the SECOND OpenAI key (DropncopyB account) so two concurrent
+# builds can be load-balanced across two separate OpenAI accounts. If this
+# env var is missing or empty, code silently falls back to using Key A for
+# everything -- so removing Key B is safe.
+_OPENAI_KEY_2 = (os.environ.get("OPENAI_API_KEY_2") or "").strip().strip('"').strip("'")
 # v25.72: bump per-request timeout from SDK default (10 min total, but often
 # fails much sooner on flaky OpenAI afternoons) to explicit 90s per request.
-# Combined with 8 retries at exponential backoff, that gives ~7 min of grace
-# per photo before we give up. Enough to ride out OpenAI wobbles.
+# Combined with 4 retries (v25.77) at exponential backoff, that gives plenty
+# of grace per photo before we give up. Enough to ride out OpenAI wobbles.
 client = (AsyncOpenAI(api_key=_OPENAI_KEY, timeout=90.0)
           if _OPENAI_KEY else AsyncOpenAI(timeout=90.0))
 
+# v25.77: Two-client load balancer.
+# ---------------------------------
+# When both OPENAI_API_KEY and OPENAI_API_KEY_2 are set, we maintain TWO
+# AsyncOpenAI clients (one per OpenAI account) and route each concurrent
+# build to the LEAST-BUSY client. Ties go to Key A. This means:
+#   - 1 person building at a time  -> always Key A
+#   - 2 concurrent builds          -> one on A, one on B
+#   - 3 concurrent builds          -> 2 on A, 1 on B (or vice versa)
+#   - 4 concurrent builds          -> 2 on A, 2 on B
+# Result: no single OpenAI account gets pinned when two people build at
+# once, and if only Key A is set the code silently uses Key A for all.
+#
+# The chosen client for a build is stored in a ContextVar (see below).
+# _openai_with_retry reads that ContextVar and routes the call to the
+# right client automatically -- no function signatures had to change.
+import contextvars
+
+client_a = client  # primary, always exists (may be unauthenticated if key missing)
+client_b = (AsyncOpenAI(api_key=_OPENAI_KEY_2, timeout=90.0)
+            if _OPENAI_KEY_2 else None)
+
+# Live count of in-flight builds bound to each client. Used by pick_client()
+# to always route new builds to the client with the fewer active builds.
+_client_a_busy: int = 0
+_client_b_busy: int = 0
+
+# The client currently in use for THIS async task. Set at the top of every
+# build endpoint via `async with bind_client_for_build():` and consumed
+# implicitly by _openai_with_retry.
+_current_client: "contextvars.ContextVar[AsyncOpenAI]" = contextvars.ContextVar(
+    "_current_client", default=client_a
+)
+# String tag for the currently-bound client ("A" or "B") — surfaced in logs
+# and in /api/jnj-diag so we can watch load balancing work.
+_current_client_tag: "contextvars.ContextVar[str]" = contextvars.ContextVar(
+    "_current_client_tag", default="A"
+)
+
+def _pick_least_busy_client() -> tuple[AsyncOpenAI, str]:
+    """Return (client, tag) for whichever client currently has the fewest
+    in-flight builds. Ties -> A. Falls back to A if B isn't configured."""
+    if client_b is None:
+        return client_a, "A"
+    if _client_b_busy < _client_a_busy:
+        return client_b, "B"
+    return client_a, "A"  # ties go to A
+
+class bind_client_for_build:
+    """Async context manager: pick the least-busy client, bind it into the
+    ContextVar for the duration of this build, and increment/decrement the
+    busy counter so future picks see the correct load. Use like:
+
+        async with bind_client_for_build() as tag:
+            ... do the whole build ...
+    """
+    def __init__(self) -> None:
+        self._client: Optional[AsyncOpenAI] = None
+        self._tag: str = "A"
+        self._token_client = None
+        self._token_tag = None
+
+    async def __aenter__(self) -> str:
+        global _client_a_busy, _client_b_busy
+        chosen, tag = _pick_least_busy_client()
+        self._client = chosen
+        self._tag = tag
+        if tag == "A":
+            _client_a_busy += 1
+        else:
+            _client_b_busy += 1
+        self._token_client = _current_client.set(chosen)
+        self._token_tag = _current_client_tag.set(tag)
+        print(f"[LB] build start on KEY-{tag} (A:{_client_a_busy} B:{_client_b_busy})")
+        return tag
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        global _client_a_busy, _client_b_busy
+        if self._tag == "A":
+            _client_a_busy = max(0, _client_a_busy - 1)
+        else:
+            _client_b_busy = max(0, _client_b_busy - 1)
+        if self._token_client is not None:
+            _current_client.reset(self._token_client)
+        if self._token_tag is not None:
+            _current_client_tag.reset(self._token_tag)
+        print(f"[LB] build end on KEY-{self._tag} (A:{_client_a_busy} B:{_client_b_busy})")
+
 @app.get("/api/debug-env")
 async def debug_env():
-    """Safe diagnostic: reports whether OPENAI_API_KEY is set and its shape.
-    Never returns the actual key.
+    """Safe diagnostic: reports whether both OpenAI keys are set and their
+    shape. Never returns the actual keys.
+
+    v25.77: adds openai_api_key_2 fields for the second (DropncopyB) key.
     """
     key = os.environ.get("OPENAI_API_KEY") or ""
+    key2 = os.environ.get("OPENAI_API_KEY_2") or ""
     return {
         "openai_api_key_present": bool(key),
         "openai_api_key_length": len(key),
@@ -253,6 +349,11 @@ async def debug_env():
         "openai_api_key_ends_with": key[-4:] if len(key) >= 4 else "",
         "openai_api_key_has_whitespace_edges": key != key.strip(),
         "openai_api_key_has_quotes": key.startswith('"') or key.startswith("'") or key.endswith('"') or key.endswith("'"),
+        "openai_api_key_2_present": bool(key2),
+        "openai_api_key_2_length": len(key2),
+        "openai_api_key_2_starts_with": key2[:7] if key2 else "",
+        "openai_api_key_2_ends_with": key2[-4:] if len(key2) >= 4 else "",
+        "load_balancer_enabled": bool(key2),
     }
 
 SYSTEM_PROMPT = """You are an OCR transcription assistant for handwritten charity-auction / consignment intake sheets. The output goes into a single DESCRIPTION field on the JnJ Online Auction listing form.
@@ -439,6 +540,39 @@ DO NOT output continuation text on its own line. DO NOT drop continuation text. 
 
 COMMON MISTAKE TO AVOID: Do NOT think 'the previous row was 8544 so the next row must be 8545.' That is only true when the sheet actually shows 8545 written in the far-left column. If the far-left column is blank, the row is a continuation, not the next item.
 
+**COIN, CURRENCY, AND SMALL-ITEM SHEETS ARE ESPECIALLY PRONE TO THIS ERROR.**
+
+On coin / currency / stamp / jewelry sheets, the seller often runs several one-line items in a row (like `1927-S MORGAN`, `1891-O MORGAN`, `1885 MORGAN`) and then hits ONE longer item that wraps to a second line. The wrap line has NO item number in the far-left column — it is the same item as the row above.
+
+This is the pattern that MUST be handled correctly:
+
+  Sheet has:                                                          Output:
+  ---------                                                            -------
+  5433  93  1921 GREAT QUALITY MORGAN                                 5433 93 1921 GREAT QUALITY MORGAN
+  5434  93  1864 CONFEDERATE CURRENCY                                 5434 93 1864 CONFEDERATE CURRENCY
+  5435  93  1899 BLACK EAGLE                                          5435 93 1899 BLACK EAGLE RARE DOUBLE DIAMOND 7 NUMBERED
+  [blank] [blank] RARE DOUBLE DIAMOND 7 NUMBERED
+  5436  93  1864 CONFEDERATE CURRENCY                                 5436 93 1864 CONFEDERATE CURRENCY LOW NUMBERED
+  [blank] [blank] LOW NUMBERED
+  5437  93  1935 NORTH AFRICAN SILVER CERT                            5437 93 1935 NORTH AFRICAN SILVER CERT YELLOW SEAL
+  [blank] [blank] YELLOW SEAL
+  5438  93  1917 LARGE NOTE U.S.                                      5438 93 1917 LARGE NOTE U S GREAT QUALITY CLEAR
+  [blank] [blank] GREAT QUALITY CLEAR
+
+NOTICE: rows 5435, 5436, 5437, 5438 each have a continuation line right below them. Every continuation line's far-left column is EMPTY — no 5436, no 5437, no 5438 written on the wrap line. That is your signal that the wrap line belongs to the row ABOVE.
+
+WRONG (do NOT do this on the sheet above):
+  Wrong output:
+    5435 93 1899 BLACK EAGLE
+    5436 93 RARE DOUBLE DIAMOND 7 NUMBERED       <-- WRONG. This is not a new item. It's continuation of 5435.
+    5437 93 1864 CONFEDERATE CURRENCY
+    5438 93 LOW NUMBERED                          <-- WRONG. Continuation of 5436.
+    ...
+
+The wrong output invents item numbers for continuation lines and shifts every real item off by one or two. The right output MERGES each wrap line into the row above it.
+
+**RULE OF THUMB FOR CURRENCY/COIN SHEETS:** If a description line is short (like just `LOW NUMBERED`, `YELLOW SEAL`, `GREAT QUALITY CLEAR`, `RARE DOUBLE DIAMOND 7 NUMBERED`) AND the far-left column is blank on that row, it is ALMOST CERTAINLY a wrap-line describing the item above. Merge it up. Never treat it as a stand-alone item.
+
 === ORDER (CRITICAL) ===
 - Output the lines in the EXACT order they appear on the page, top to bottom.
 - Do NOT sort by item number. Do NOT rearrange. Do NOT alphabetize.
@@ -508,7 +642,41 @@ Do NOT add commentary, do NOT add a "Transcription:" header, do NOT add column l
 MAX_CONCURRENT = 3
 
 
-async def _openai_with_retry(coro_factory, *, max_attempts: int = 8, op_name: str = "openai"):
+# v25.77: Unjam telemetry. Every time a call to OpenAI fails with a
+# connection error or times out, we record the timestamp. The /api/health
+# endpoint reads this list, and if we've had too many failures in the
+# last 60 seconds it returns 503 Service Unavailable. Render's health
+# check is configured to auto-restart the service when /api/health
+# returns 503 repeatedly, so a jammed worker self-heals in ~90 seconds
+# instead of waiting for Ashley to notice and hit the restart button.
+_openai_recent_failures: list[float] = []
+_OPENAI_FAILURE_WINDOW_SEC = 60.0
+_OPENAI_FAILURE_THRESHOLD = 15  # 15 failures in 60s = jammed
+
+def _record_openai_failure() -> None:
+    now = time.monotonic()
+    _openai_recent_failures.append(now)
+    # Trim entries older than the window so the list can't grow unbounded.
+    cutoff = now - _OPENAI_FAILURE_WINDOW_SEC
+    while _openai_recent_failures and _openai_recent_failures[0] < cutoff:
+        _openai_recent_failures.pop(0)
+
+def _openai_failure_count_recent() -> int:
+    now = time.monotonic()
+    cutoff = now - _OPENAI_FAILURE_WINDOW_SEC
+    while _openai_recent_failures and _openai_recent_failures[0] < cutoff:
+        _openai_recent_failures.pop(0)
+    return len(_openai_recent_failures)
+
+
+# v25.77: hard per-attempt timeout. A single OpenAI Vision call must
+# complete within this budget or we abandon it (and the retry loop
+# decides whether to try again). Prevents ONE stuck call from pinning
+# the CPU for 15 minutes waiting on OpenAI to reply.
+_OPENAI_PER_ATTEMPT_TIMEOUT_SEC = 60.0
+
+
+async def _openai_with_retry(coro_factory, *, max_attempts: int = 4, op_name: str = "openai"):
     """Call an OpenAI SDK coroutine with automatic retry on transient errors.
 
     v25.65: added to make sheet builds resilient to short 429 (rate limit)
@@ -516,11 +684,25 @@ async def _openai_with_retry(coro_factory, *, max_attempts: int = 8, op_name: st
     ONLY on transient failures (429, connection/timeout, 5xx). Any real
     error (4xx other than 429) is re-raised immediately so callers still
     see genuine problems. Honors the server's Retry-After hint when present,
-    otherwise uses exponential backoff (1s, 2s, 4s, 8s, capped at 15s).
+    otherwise uses exponential backoff.
+
+    v25.77: two safety changes to prevent CPU pinning on bad OpenAI days:
+      1. Default max_attempts lowered from 8 -> 4. On truly-dead OpenAI,
+         8 retries with 1+2+4+8+15+15+15+15 = ~83s of waiting per call
+         piled up across dozens of parallel calls. 4 retries = 1+2+4+8
+         = ~15s max, much less pileup.
+      2. Wait cap lowered from 15s -> 8s per retry. Same reasoning.
+      3. Each attempt is wrapped in asyncio.wait_for() with a 60s hard
+         timeout, so an OpenAI call that just hangs indefinitely can't
+         hold a worker forever. Timeout counts as a transient failure
+         and triggers the retry path.
+      4. Every transient failure is recorded in _openai_recent_failures
+         so /api/health can report a 503 when too many are piling up,
+         which triggers Render auto-restart.
 
     Pass a zero-arg lambda that creates the coroutine, e.g.:
         resp = await _openai_with_retry(
-            lambda: client.chat.completions.create(model=..., messages=...),
+            lambda: _current_client.get().chat.completions.create(model=..., messages=...),
             op_name="transcribe_image",
         )
     We need a factory (not a coroutine) because a coroutine can only be
@@ -529,7 +711,10 @@ async def _openai_with_retry(coro_factory, *, max_attempts: int = 8, op_name: st
     last_exc: Optional[BaseException] = None
     for attempt in range(max_attempts):
         try:
-            return await coro_factory()
+            # v25.77: hard per-attempt timeout. If this raises TimeoutError,
+            # the outer except block treats it like a connection/timeout
+            # and retries (or exhausts).
+            return await asyncio.wait_for(coro_factory(), timeout=_OPENAI_PER_ATTEMPT_TIMEOUT_SEC)
         except RateLimitError as e:
             last_exc = e
             # Honor server hint if present (headers.retry-after, in seconds)
@@ -543,13 +728,15 @@ async def _openai_with_retry(coro_factory, *, max_attempts: int = 8, op_name: st
             except Exception:
                 wait = 0.0
             if wait <= 0:
-                wait = min(2 ** attempt, 15)
+                wait = min(2 ** attempt, 8)
+            _record_openai_failure()
             print(f"[{op_name}] 429 rate limit; retry {attempt + 1}/{max_attempts} in {wait:.1f}s")
             await asyncio.sleep(wait)
             continue
-        except (APIConnectionError, APITimeoutError) as e:
+        except (APIConnectionError, APITimeoutError, asyncio.TimeoutError) as e:
             last_exc = e
-            wait = min(2 ** attempt, 15)
+            wait = min(2 ** attempt, 8)
+            _record_openai_failure()
             print(f"[{op_name}] connection/timeout; retry {attempt + 1}/{max_attempts} in {wait:.1f}s")
             await asyncio.sleep(wait)
             continue
@@ -559,7 +746,8 @@ async def _openai_with_retry(coro_factory, *, max_attempts: int = 8, op_name: st
             if status is None or status < 500:
                 raise
             last_exc = e
-            wait = min(2 ** attempt, 15)
+            wait = min(2 ** attempt, 8)
+            _record_openai_failure()
             print(f"[{op_name}] server {status}; retry {attempt + 1}/{max_attempts} in {wait:.1f}s")
             await asyncio.sleep(wait)
             continue
@@ -611,7 +799,7 @@ async def _read_left_column_numbers(image_bytes: bytes) -> List[str]:
     data_url = f"data:image/png;base64,{b64}"
     try:
         resp = await _openai_with_retry(
-            lambda: client.chat.completions.create(
+            lambda: _current_client.get().chat.completions.create(
                 model="gpt-4o",
                 max_tokens=800,
                 messages=[
@@ -789,7 +977,7 @@ async def transcribe_image(image_bytes: bytes, media_type: str) -> str:
     # (fixes 3-with-closed-top-looks-like-2 handwriting misreads that were
     # cascading through the whole sheet via the sequential-by-1 rule).
     main_task = _openai_with_retry(
-        lambda: client.chat.completions.create(
+        lambda: _current_client.get().chat.completions.create(
             model="gpt-4o",
             max_tokens=4000,
             messages=[
@@ -833,7 +1021,7 @@ async def is_intake_sheet(image_bytes: bytes, media_type: str) -> bool:
     data_url = f"data:{media_type};base64,{b64}"
     try:
         resp = await _openai_with_retry(
-            lambda: client.chat.completions.create(
+            lambda: _current_client.get().chat.completions.create(
             model="gpt-4o-mini",
             max_tokens=10,
             messages=[
@@ -1191,7 +1379,14 @@ async def extract_stream(file: UploadFile = File(...)):
     name = (file.filename or "").lower()
 
     async def stream():
-        try:
+        # v25.77: bind this whole build to whichever OpenAI key is least
+        # busy right now. All nested transcribe_image calls (and their
+        # _current_client.get() lookup inside _openai_with_retry) pick up
+        # the chosen client automatically via ContextVar. Using this
+        # OUTSIDE the try/except so cleanup runs even if the stream is
+        # cancelled mid-flight.
+        async with bind_client_for_build() as _lb_tag:
+         try:
             # -------- PDF path (multi-page, parallel) --------
             if ctype == "application/pdf" or name.endswith(".pdf"):
                 images = render_pdf_pages(data)
@@ -1292,7 +1487,7 @@ async def extract_stream(file: UploadFile = File(...)):
 
             yield json.dumps({"type": "error", "message": f"unsupported file type: {ctype or 'unknown'}"}) + "\n"
 
-        except Exception as e:
+         except Exception as e:
             yield json.dumps({"type": "error", "message": str(e)}) + "\n"
 
     return StreamingResponse(stream(), media_type="application/x-ndjson")
@@ -1589,7 +1784,25 @@ async def export_jnj_csv(
 
 @app.get("/api/health")
 def health():
-    return {"ok": True}
+    # v25.77: report unhealthy when we've had too many OpenAI failures in
+    # the last 60 seconds. Render's health check is configured to auto-
+    # restart the service when this endpoint returns 503 repeatedly, so
+    # a jammed worker self-heals in ~90 seconds without a human involved.
+    failures = _openai_failure_count_recent()
+    if failures >= _OPENAI_FAILURE_THRESHOLD:
+        # 503 tells Render (and any external monitor) that the service is
+        # in a degraded state and should be replaced.
+        return JSONResponse(
+            status_code=503,
+            content={
+                "ok": False,
+                "reason": "openai_jam",
+                "recent_failures": failures,
+                "threshold": _OPENAI_FAILURE_THRESHOLD,
+                "window_sec": _OPENAI_FAILURE_WINDOW_SEC,
+            },
+        )
+    return {"ok": True, "recent_openai_failures": failures}
 
 
 # =========================================================================
@@ -1657,7 +1870,7 @@ async def read_photo_tag(image_bytes: bytes, media_type: str, pre_shrunk: bool =
         # ~15× cheaper, plenty accurate for reading a 3-digit tag number.
         # Also shortened the prompt — mini burns fewer tokens on short prompts.
         resp = await _openai_with_retry(
-            lambda: client.chat.completions.create(
+            lambda: _current_client.get().chat.completions.create(
             model="gpt-4o-mini",
             max_tokens=20,
             messages=[
@@ -1702,7 +1915,7 @@ async def match_photo_by_description(photo_desc: str, items: List[Dict]) -> Opti
     )
     try:
         resp = await _openai_with_retry(
-            lambda: client.chat.completions.create(
+            lambda: _current_client.get().chat.completions.create(
             model="gpt-4o-mini",
             max_tokens=30,
             messages=[{"role": "user", "content": prompt}],
@@ -1782,7 +1995,7 @@ async def extract_seller_groups(image_bytes: bytes, media_type: str) -> List[Dic
     try:
         b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
         resp = await _openai_with_retry(
-            lambda: client.chat.completions.create(
+            lambda: _current_client.get().chat.completions.create(
             model="gpt-4o",
             max_tokens=200,
             temperature=0,
@@ -1865,7 +2078,7 @@ async def extract_seller_number(image_bytes: bytes, media_type: str) -> str:
         # Prompt is also stricter and shows the model concrete examples of
         # what the boxes look like (e.g. "06", "1894", "2860").
         resp = await _openai_with_retry(
-            lambda: client.chat.completions.create(
+            lambda: _current_client.get().chat.completions.create(
             model="gpt-4o",
             max_tokens=15,
             temperature=0,
@@ -1965,16 +2178,19 @@ async def jnj_build(files: List[UploadFile] = File(...)):
     if not files:
         raise HTTPException(400, "No files uploaded.")
 
-    try:
-        return await _jnj_build_inner(files)
-    except HTTPException:
-        raise
-    except Exception as e:
-        import traceback
-        tb = traceback.format_exc()
-        print(f"JNJ-BUILD FATAL ERROR: {e}\n{tb}", flush=True)
-        # Return the actual error to the client so it's visible on mobile.
-        raise HTTPException(500, f"{type(e).__name__}: {str(e)[:400]}")
+    # v25.77: bind this build to the least-busy OpenAI client for its
+    # full duration so parallel builds can be spread across both keys.
+    async with bind_client_for_build():
+        try:
+            return await _jnj_build_inner(files)
+        except HTTPException:
+            raise
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            print(f"JNJ-BUILD FATAL ERROR: {e}\n{tb}", flush=True)
+            # Return the actual error to the client so it's visible on mobile.
+            raise HTTPException(500, f"{type(e).__name__}: {str(e)[:400]}")
 
 
 async def _jnj_build_inner(files: List[UploadFile]) -> JSONResponse:
@@ -2107,8 +2323,12 @@ async def jnj_build_sheet(sheet: UploadFile = File(...)):
     includes a `pages` array (one entry per page) so the frontend can flatten
     a single multi-page PDF into N virtual sheets. For a single-image upload
     or a single-page PDF, `pages` has exactly one entry.
+
+    v25.77: bound to a load-balanced OpenAI client for the full request.
     """
-    try:
+    # v25.77: pick the least-busy OpenAI client for this whole request.
+    async with bind_client_for_build():
+     try:
         # Read the sheet ONCE, then do transcription + seller-number extraction
         # against the same bytes. transcribe_uploaded_sheet and
         # extract_seller_number_from_sheet both call .read(), which would
@@ -2179,9 +2399,9 @@ async def jnj_build_sheet(sheet: UploadFile = File(...)):
             "pages": good_pages,
             "page_count": len(good_pages),
         })
-    except HTTPException:
+     except HTTPException:
         raise
-    except Exception as e:
+     except Exception as e:
         import traceback
         print(f"JNJ-BUILD-SHEET FATAL: {e}\n{traceback.format_exc()}", flush=True)
         raise HTTPException(500, f"{type(e).__name__}: {str(e)[:400]}")
@@ -2195,8 +2415,12 @@ async def jnj_match_photos(
     """Step 2 of the split flow: process a BATCH of photos against a known
     items list. Kept small enough (<= ~8 photos) to finish under 30s on
     Render's default proxy timeout. Can be called multiple times.
+
+    v25.77: bound to a load-balanced OpenAI client for the full request.
     """
-    try:
+    # v25.77: pick the least-busy OpenAI client for this whole request.
+    async with bind_client_for_build():
+     try:
         items = json.loads(items_json)
         if not isinstance(items, list) or not items:
             raise HTTPException(400, "items_json must be a non-empty list.")
@@ -2318,7 +2542,7 @@ async def jnj_match_photos(
             elif ai_thumb_b64 and _OPENAI_KEY:
                 try:
                     resp = await _openai_with_retry(
-                        lambda: client.chat.completions.create(
+                        lambda: _current_client.get().chat.completions.create(
                         model="gpt-4o-mini",
                         messages=[{
                             "role": "user",
@@ -2451,9 +2675,9 @@ async def jnj_match_photos(
         # description-based fallback for photos that end up in the wrong
         # segment, add it here — but for now, less code = fewer OOMs.
         return JSONResponse({"photos": photo_infos})
-    except HTTPException:
+     except HTTPException:
         raise
-    except Exception as e:
+     except Exception as e:
         import traceback
         print(f"JNJ-MATCH-PHOTOS FATAL: {e}\n{traceback.format_exc()}", flush=True)
         raise HTTPException(500, f"{type(e).__name__}: {str(e)[:400]}")
@@ -2462,12 +2686,23 @@ async def jnj_match_photos(
 @app.get("/api/jnj-diag")
 async def jnj_diag():
     """Quick health check to verify the JnJ endpoint is reachable and the
-    OpenAI key is loaded. Returns 200 if all is well."""
+    OpenAI key is loaded. Returns 200 if all is well.
+
+    v25.77: also reports which keys are configured and the live load-
+    balancer state so you can watch the two-key routing work.
+    """
     import os, sys as _sys
     return JSONResponse({
         "ok": True,
         "has_openai_key": bool(os.environ.get("OPENAI_API_KEY")),
+        "has_openai_key_2": bool(os.environ.get("OPENAI_API_KEY_2")),
+        "key_a_active_builds": _client_a_busy,
+        "key_b_active_builds": _client_b_busy,
+        "load_balancer_enabled": client_b is not None,
+        "recent_openai_failures": _openai_failure_count_recent(),
+        "failure_threshold": _OPENAI_FAILURE_THRESHOLD,
         "python_version": _sys.version.split()[0],
+        "build_id": "2026-09-19-autorestart-unjam-lb-v25.77",
     })
 
 
@@ -2523,26 +2758,28 @@ async def jnj_resolve_maybe(
             "detail": "low",
         }})
 
-    try:
-        # v25.5: back to gpt-4o-mini for speed. v25.3's full gpt-4o here was
-        # causing the pipeline to hang because every close-up now went
-        # through this endpoint AND took several seconds each.
-        resp = await _openai_with_retry(
-            lambda: client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": content}],
-            max_tokens=5,
-            temperature=0,
-            ),
-            op_name="jnj_resolve_maybe",
-        )
-        answer = (resp.choices[0].message.content or "").strip().lower()
-        is_item = not answer.startswith("b")  # blank -> not item
-        return JSONResponse({"is_item": is_item})
-    except Exception as e:
-        print(f"resolve-maybe failed: {type(e).__name__}: {e}", flush=True)
-        # Safe default — if AI fails, keep the photo.
-        return JSONResponse({"is_item": True})
+    # v25.77: pick least-busy client for this OpenAI call.
+    async with bind_client_for_build():
+        try:
+            # v25.5: back to gpt-4o-mini for speed. v25.3's full gpt-4o here was
+            # causing the pipeline to hang because every close-up now went
+            # through this endpoint AND took several seconds each.
+            resp = await _openai_with_retry(
+                lambda: _current_client.get().chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": content}],
+                max_tokens=5,
+                temperature=0,
+                ),
+                op_name="jnj_resolve_maybe",
+            )
+            answer = (resp.choices[0].message.content or "").strip().lower()
+            is_item = not answer.startswith("b")  # blank -> not item
+            return JSONResponse({"is_item": is_item})
+        except Exception as e:
+            print(f"resolve-maybe failed: {type(e).__name__}: {e}", flush=True)
+            # Safe default — if AI fails, keep the photo.
+            return JSONResponse({"is_item": True})
 
 
 @app.post("/api/jnj-verify-assignment")
@@ -2578,45 +2815,47 @@ async def jnj_verify_assignment(
     cur = current_item_desc.strip()[:300]
     nxt = next_item_desc.strip()[:300]
 
-    try:
-        resp = await _openai_with_retry(
-            lambda: client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": (
-                        "An estate-auction photo has been tentatively assigned to Item A. Look at the photo (ignore the 'JNJ ONLINE AUCTION - FREMONT' watermark burned into the bottom) and decide which item it best matches.\n\n"
-                        f"ITEM A description: {cur}\n"
-                        f"ITEM B description: {nxt}\n\n"
-                        "Note: an item may contain multiple objects (e.g. '3 lamps, 2 vases, box of tools') and Dave often shoots several photos per item from different angles. A photo showing ANY object mentioned in item A's description matches Item A.\n\n"
-                        "Reply with EXACTLY one word:\n"
-                        "  A       - photo clearly shows an object described in Item A (default when unsure)\n"
-                        "  B       - photo clearly shows an object described in Item B but NOT in Item A\n"
-                        "  NEITHER - photo doesn't match either description (rare)\n\n"
-                        "Bias strongly toward A. Only answer B if the photo shows something specifically mentioned in Item B's description that is NOT in Item A's description."
-                    )},
-                    {"type": "image_url", "image_url": {
-                        "url": f"data:image/jpeg;base64,{photo_b64}",
-                        "detail": "low",
-                    }},
-                ],
-            }],
-            max_tokens=5,
-            temperature=0,
-            ),
-            op_name="jnj_verify_assignment",
-        )
-        answer = (resp.choices[0].message.content or "").strip().upper()
-        if answer.startswith("B"):
-            return JSONResponse({"verdict": "next"})
-        if answer.startswith("N"):
-            return JSONResponse({"verdict": "neither"})
-        return JSONResponse({"verdict": "current"})
-    except Exception as e:
-        print(f"verify-assignment failed: {type(e).__name__}: {e}", flush=True)
-        # Safe default: keep on current item.
-        return JSONResponse({"verdict": "current"})
+    # v25.77: pick least-busy client for this OpenAI call.
+    async with bind_client_for_build():
+        try:
+            resp = await _openai_with_retry(
+                lambda: _current_client.get().chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": (
+                            "An estate-auction photo has been tentatively assigned to Item A. Look at the photo (ignore the 'JNJ ONLINE AUCTION - FREMONT' watermark burned into the bottom) and decide which item it best matches.\n\n"
+                            f"ITEM A description: {cur}\n"
+                            f"ITEM B description: {nxt}\n\n"
+                            "Note: an item may contain multiple objects (e.g. '3 lamps, 2 vases, box of tools') and Dave often shoots several photos per item from different angles. A photo showing ANY object mentioned in item A's description matches Item A.\n\n"
+                            "Reply with EXACTLY one word:\n"
+                            "  A       - photo clearly shows an object described in Item A (default when unsure)\n"
+                            "  B       - photo clearly shows an object described in Item B but NOT in Item A\n"
+                            "  NEITHER - photo doesn't match either description (rare)\n\n"
+                            "Bias strongly toward A. Only answer B if the photo shows something specifically mentioned in Item B's description that is NOT in Item A's description."
+                        )},
+                        {"type": "image_url", "image_url": {
+                            "url": f"data:image/jpeg;base64,{photo_b64}",
+                            "detail": "low",
+                        }},
+                    ],
+                }],
+                max_tokens=5,
+                temperature=0,
+                ),
+                op_name="jnj_verify_assignment",
+            )
+            answer = (resp.choices[0].message.content or "").strip().upper()
+            if answer.startswith("B"):
+                return JSONResponse({"verdict": "next"})
+            if answer.startswith("N"):
+                return JSONResponse({"verdict": "neither"})
+            return JSONResponse({"verdict": "current"})
+        except Exception as e:
+            print(f"verify-assignment failed: {type(e).__name__}: {e}", flush=True)
+            # Safe default: keep on current item.
+            return JSONResponse({"verdict": "current"})
 
 
 @app.post("/api/jnj-rematch")
@@ -2626,14 +2865,18 @@ async def jnj_rematch(
     items_json: str = Form(...),
 ):
     """Retry description-based match for one photo. Client passes the photo's
-    description_read and the current item list; we return a new item_num or empty."""
+    description_read and the current item list; we return a new item_num or empty.
+
+    v25.77: bound to a load-balanced OpenAI client.
+    """
     try:
         items = json.loads(items_json)
     except Exception:
         raise HTTPException(400, "Bad items_json")
     if not description:
         return JSONResponse({"item_num_match": ""})
-    matched = await match_photo_by_description(description, items)
+    async with bind_client_for_build():
+        matched = await match_photo_by_description(description, items)
     return JSONResponse({"item_num_match": matched or ""})
 
 

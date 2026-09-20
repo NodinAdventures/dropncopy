@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-09-10-concurrency-3-v25.76";
+const BUILD_ID = "2026-09-19-v26-review-flow";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v25.76 boot. BUILD_ID:", "2026-09-10-concurrency-3-v25.76");
+jnjLog("BOOT", "v26 boot. BUILD_ID:", "2026-09-19-v26-review-flow");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -100,6 +100,288 @@ function loadCsvPrefs() {
 }
 function saveCsvPrefs(prefs) {
   try { localStorage.setItem(CSV_PREFS_KEY, JSON.stringify(prefs)); } catch {}
+}
+
+/* -------------------- Small-screen block (v26) --------------------
+   Drop N Copy is a desktop/laptop tool. On phones or portrait tablets
+   the drag targets are unusable and the review tables can't show enough
+   rows to be worth anything. Rather than half-support mobile, we throw a
+   full-screen stop message under 1024px wide. That threshold keeps every
+   real laptop and iPad landscape in the clear; only phones and portrait
+   iPads see the block. Re-checks on window resize so a devtools-shrunk
+   window also gets the message. */
+const SMALL_SCREEN_MIN_WIDTH = 1024;
+function jnjCheckScreenSize() {
+  try {
+    const blocker = document.getElementById("smallScreenBlock");
+    if (!blocker) return;
+    if (window.innerWidth < SMALL_SCREEN_MIN_WIDTH) {
+      blocker.style.display = "flex";
+    } else {
+      blocker.style.display = "none";
+    }
+  } catch {}
+}
+jnjCheckScreenSize();
+window.addEventListener("resize", jnjCheckScreenSize);
+
+/* -------------------- Text Review Modal (v26 Step 1) --------------------
+   After the AI transcribes the sheet(s) but BEFORE we spend time matching
+   photos, this modal lets Dave / Kim eyeball every AI-typed row and:
+     - Retype any field (item #, lot code, description) in place
+     - Merge a wrap-line that was split into two rows into the previous row
+     - Split a mashed-together row into two rows
+     - Delete a bogus row entirely
+   Browser-native spellcheck (spellcheck="true") does the heavy lifting for
+   typo detection — SANDLES, FARBERWEAR, KNIFES all get red squiggled by
+   the browser, right-click to fix. No custom dictionary yet; browsers
+   ignore brand names but those aren't errors anyway.
+
+   Returns a Promise:
+     - resolve(newItems[])  when user clicks "Continue to Photos"
+     - reject(new Error())  when user clicks "Cancel"
+
+   Items in the returned array have the same shape as items going in
+   (item_num, lot_number, description, sheet_seller_num, sheet_index,
+    _row_key), so downstream photo-match / CSV code doesn't need to change. */
+function openTextReviewModal(itemsIn) {
+  return new Promise((resolve, reject) => {
+    // Deep-copy the items so cancel truly restores originals. We only
+    // mutate `working` inside the modal.
+    const working = itemsIn.map(it => ({
+      _row_key: it._row_key,
+      item_num: String(it.item_num || ""),
+      lot_number: String(it.lot_number || it.LotNumber || ""),
+      description: String(it.description || it.Description || ""),
+      sheet_seller_num: it.sheet_seller_num || "",
+      sheet_index: it.sheet_index,
+      // pass through anything else so nothing gets lost
+      _original: it,
+    }));
+
+    // Counter used to mint _row_key values for rows Dave adds via Split.
+    // Existing keys look like "row0", "row1"; new ones look like "rowNew1".
+    let newRowCounter = 0;
+
+    // ---- Build the overlay DOM ----
+    const overlay = document.createElement("div");
+    overlay.className = "jnj-review-overlay";
+    overlay.setAttribute("role", "dialog");
+    overlay.setAttribute("aria-modal", "true");
+    overlay.innerHTML = `
+      <div class="jnj-review-modal">
+        <div class="jnj-review-head">
+          <div>
+            <h2>Review typed listings</h2>
+            <div class="jnj-review-sub">
+              Fix any spellings, wrap-line splits, or wrong lot numbers before we match photos.
+              Words underlined in red are possible typos — right-click for suggestions.
+            </div>
+          </div>
+          <div class="jnj-review-actions">
+            <button type="button" class="ghost-btn" data-action="cancel">Cancel build</button>
+            <button type="button" class="action-btn primary" data-action="continue">Continue to Photos →</button>
+          </div>
+        </div>
+        <div class="jnj-review-hint">
+          <strong>Row tools:</strong>
+          <span class="jnj-review-hint-item"><span class="tool-swatch merge">↑</span> Merge into row above</span>
+          <span class="jnj-review-hint-item"><span class="tool-swatch split">↲</span> Split into two rows</span>
+          <span class="jnj-review-hint-item"><span class="tool-swatch delete">×</span> Delete row</span>
+          <span class="jnj-review-count" data-role="count"></span>
+        </div>
+        <div class="jnj-review-body">
+          <table class="jnj-review-table">
+            <thead>
+              <tr>
+                <th style="width:56px;">#</th>
+                <th style="width:110px;">Item #</th>
+                <th style="width:88px;">Lot</th>
+                <th>Description</th>
+                <th style="width:130px;">Tools</th>
+              </tr>
+            </thead>
+            <tbody data-role="rows"></tbody>
+          </table>
+        </div>
+        <div class="jnj-review-foot">
+          <div class="jnj-review-foot-msg">
+            Done reviewing? Click <strong>Continue to Photos</strong> to match photos to these lots.
+          </div>
+          <div class="jnj-review-actions">
+            <button type="button" class="ghost-btn" data-action="cancel">Cancel build</button>
+            <button type="button" class="action-btn primary" data-action="continue">Continue to Photos →</button>
+          </div>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    document.body.style.overflow = "hidden";
+
+    const rowsEl = overlay.querySelector('[data-role="rows"]');
+    const countEl = overlay.querySelector('[data-role="count"]');
+
+    // ---- Render all rows ----
+    function renderRows() {
+      rowsEl.innerHTML = "";
+      working.forEach((row, idx) => {
+        const tr = document.createElement("tr");
+        tr.dataset.rowKey = row._row_key;
+        // Item # cell — editable, monospace, small.
+        const numTd = document.createElement("td");
+        numTd.className = "idx";
+        numTd.textContent = String(idx + 1);
+        tr.appendChild(numTd);
+
+        const itemTd = document.createElement("td");
+        itemTd.innerHTML = `<input type="text" class="jnj-review-input item" value="${_escAttr(row.item_num)}" spellcheck="false" />`;
+        tr.appendChild(itemTd);
+
+        const lotTd = document.createElement("td");
+        lotTd.innerHTML = `<input type="text" class="jnj-review-input lot" value="${_escAttr(row.lot_number)}" spellcheck="false" placeholder="—" />`;
+        tr.appendChild(lotTd);
+
+        // Description — textarea so long descriptions grow, spellcheck=true.
+        const descTd = document.createElement("td");
+        descTd.innerHTML = `<textarea class="jnj-review-input desc" spellcheck="true" rows="1">${_escText(row.description)}</textarea>`;
+        tr.appendChild(descTd);
+
+        // Tools cell — Merge ↑, Split ↲, Delete ×.
+        const tools = document.createElement("td");
+        tools.className = "tools";
+        tools.innerHTML = `
+          <button type="button" class="row-tool merge" title="Merge this row's text into the row above" data-action="merge">↑</button>
+          <button type="button" class="row-tool split" title="Split into two rows (adds a blank row below)" data-action="split">↲</button>
+          <button type="button" class="row-tool delete" title="Delete this row" data-action="delete">×</button>
+        `;
+        tr.appendChild(tools);
+
+        // Wire input changes back into working[]
+        const itemInput = tr.querySelector(".jnj-review-input.item");
+        const lotInput = tr.querySelector(".jnj-review-input.lot");
+        const descInput = tr.querySelector(".jnj-review-input.desc");
+        // Autosize textarea to content height
+        const autosize = (ta) => {
+          ta.style.height = "auto";
+          ta.style.height = (ta.scrollHeight + 2) + "px";
+        };
+        itemInput.addEventListener("input", () => { row.item_num = itemInput.value; });
+        lotInput.addEventListener("input", () => { row.lot_number = lotInput.value; });
+        descInput.addEventListener("input", () => {
+          row.description = descInput.value;
+          autosize(descInput);
+        });
+        // Row-tool button handlers
+        tools.addEventListener("click", (e) => {
+          const btn = e.target.closest("button.row-tool");
+          if (!btn) return;
+          const action = btn.dataset.action;
+          if (action === "merge") {
+            // Merge this row into the row above. Concatenate description with
+            // a single space. Preserve the row-above's item_num and lot.
+            if (idx === 0) {
+              toast("Can't merge — this is the first row.");
+              return;
+            }
+            const above = working[idx - 1];
+            const merged = (above.description || "").trim() + " " + (row.description || "").trim();
+            above.description = merged.replace(/\s+/g, " ").trim();
+            working.splice(idx, 1);
+            renderRows();
+          } else if (action === "split") {
+            // Insert a blank row directly below this one. Cursor jumps to
+            // the new row's description field.
+            newRowCounter += 1;
+            const newRow = {
+              _row_key: `rowNew${newRowCounter}`,
+              item_num: "",
+              lot_number: row.lot_number || "",   // inherit lot — usually the split's on the same shelf
+              description: "",
+              sheet_seller_num: row.sheet_seller_num,
+              sheet_index: row.sheet_index,
+              _original: null,   // brand-new, no original
+            };
+            working.splice(idx + 1, 0, newRow);
+            renderRows();
+            // Focus the new row's description after render
+            const nextTr = rowsEl.querySelector(`tr[data-row-key="${newRow._row_key}"]`);
+            const nextDesc = nextTr && nextTr.querySelector("textarea.desc");
+            if (nextDesc) nextDesc.focus();
+          } else if (action === "delete") {
+            if (!confirm(`Delete row ${idx + 1} (item ${row.item_num || "[blank]"})?\n\nThis cannot be undone within the review.`)) return;
+            working.splice(idx, 1);
+            renderRows();
+          }
+        });
+
+        rowsEl.appendChild(tr);
+        // Autosize the description after mount
+        autosize(descInput);
+      });
+      countEl.textContent = `${working.length} lot${working.length === 1 ? "" : "s"}`;
+    }
+    renderRows();
+
+    // ---- Wire header / footer buttons ----
+    function cleanup() {
+      document.body.style.overflow = "";
+      try { overlay.remove(); } catch {}
+    }
+    overlay.addEventListener("click", (e) => {
+      const btn = e.target.closest("button[data-action]");
+      if (!btn) return;
+      const action = btn.dataset.action;
+      if (action === "cancel") {
+        if (!confirm("Cancel this build?\n\nThe AI-typed listings will be discarded. You can start over anytime.")) return;
+        cleanup();
+        reject(new Error("cancelled"));
+      } else if (action === "continue") {
+        // Strip empty rows silently (a row with no item#, no lot, no desc
+        // is junk and would break the CSV downstream).
+        const kept = working.filter(r =>
+          (r.item_num || "").trim() ||
+          (r.lot_number || "").trim() ||
+          (r.description || "").trim()
+        );
+        if (!kept.length) {
+          alert("Every row is empty. Please add at least one item, or Cancel.");
+          return;
+        }
+        // Rebuild items in the exact shape downstream expects.
+        const out = kept.map(r => {
+          const base = r._original ? { ...r._original } : {};
+          base.item_num = (r.item_num || "").trim();
+          base.lot_number = (r.lot_number || "").trim();
+          base.LotNumber = base.lot_number;   // some downstream code reads this alias
+          base.description = (r.description || "").trim();
+          base.Description = base.description; // alias
+          base.sheet_seller_num = r.sheet_seller_num || "";
+          base.sheet_index = r.sheet_index;
+          base._row_key = r._row_key;
+          return base;
+        });
+        cleanup();
+        resolve(out);
+      }
+    });
+
+    // Escape key = cancel
+    const escHandler = (e) => {
+      if (e.key === "Escape") {
+        if (confirm("Cancel this build?\n\nThe AI-typed listings will be discarded.")) {
+          document.removeEventListener("keydown", escHandler);
+          cleanup();
+          reject(new Error("cancelled"));
+        }
+      }
+    };
+    document.addEventListener("keydown", escHandler);
+  });
+}
+function _escAttr(s) {
+  return String(s || "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+function _escText(s) {
+  return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 /* -------------------- DOM refs -------------------- */
@@ -1108,15 +1390,42 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v25.76 · ${BUILD_ID}`;
+  badge.textContent = `v26 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
   badge.style.pointerEvents = "auto";
   badge.style.cursor = "pointer";
-  badge.title = "Click to view debug log";
+  badge.title = "Click to view debug log — shows live load-balancer state";
   badge.addEventListener("click", () => jnjShowDebugOverlay());
   document.body.appendChild(badge);
+
+  // v25.77: live load-balancer indicator. Every 5 seconds we ask the server
+  // how many builds each OpenAI key is currently handling, and show it in
+  // the corner badge like "v25.77 · A:1 B:0". Makes the two-key routing
+  // visible during testing without opening devtools. If polling fails
+  // (server down, offline, whatever), the badge silently falls back to
+  // just the build ID — no user-facing error.
+  const LB_DIAG_URL = "__PORT_5000__".startsWith("__")
+    ? "/api/jnj-diag"
+    : "__PORT_5000__/api/jnj-diag";
+  async function jnjPollLbState() {
+    try {
+      const r = await fetch(LB_DIAG_URL, { cache: "no-store" });
+      if (!r.ok) return;
+      const j = await r.json();
+      const a = Number(j.key_a_active_builds || 0);
+      const b = Number(j.key_b_active_builds || 0);
+      const lbOn = Boolean(j.load_balancer_enabled);
+      if (lbOn) {
+        badge.textContent = `v25.77 · A:${a} B:${b}`;
+      } else {
+        badge.textContent = `v25.77 · A:${a} (single key)`;
+      }
+    } catch {}
+  }
+  jnjPollLbState();
+  setInterval(jnjPollLbState, 5000);
 } catch {}
 
 // Health-check URL for warming up the free-tier server before doing real work.
@@ -1387,7 +1696,40 @@ async function jnjHandleFiles(input) {
       }
     }
 
-    statusEl.textContent = `sheets done — ${items.length} items across ${sheets.length} sheet${sheets.length > 1 ? "s" : ""}${sellerNums.length ? `, sellers ${[...new Set(sellerNums)].join(", ")}` : ""}. Matching ${photos.length} photos…`;
+    statusEl.textContent = `sheets done — ${items.length} items across ${sheets.length} sheet${sheets.length > 1 ? "s" : ""}${sellerNums.length ? `, sellers ${[...new Set(sellerNums)].join(", ")}` : ""}.`;
+
+    // ---------- Step 1.5 (v26): TEXT REVIEW pause point ----------
+    // Before we spend time matching photos, let Dave / Kim eyeball the
+    // AI-typed listings and fix any wrap-line splits, spellings, or
+    // wrong lot numbers. This is the single biggest error-prevention
+    // improvement we can make — catches spellings (SANDLES → SANDALS)
+    // and wrap-line bugs (5435 1899 BLACK EAGLE → continuation absorbed)
+    // BEFORE they become photos-attached-to-wrong-lot problems.
+    //
+    // openTextReviewModal returns a Promise that resolves with the
+    // (possibly edited) items array. If Dave hits Cancel, it rejects
+    // and we abort the whole build.
+    statusEl.textContent = "waiting for text review…";
+    let reviewedItems;
+    try {
+      reviewedItems = await openTextReviewModal(items);
+    } catch (cancelErr) {
+      // Dave cancelled from the review modal — abort cleanly.
+      processingTray.classList.add("hidden");
+      processingList.innerHTML = "";
+      toast("Build cancelled from text review.");
+      return;
+    }
+    // Splice reviewed items back over the raw items (mutate in place
+    // preserving _row_key so downstream logic keeps working). If Dave
+    // added rows via Split, they already have new _row_keys. If Dave
+    // merged rows, the merged-away rows were removed.
+    items.length = 0;
+    for (const it of reviewedItems) items.push(it);
+    if (!items.length) {
+      throw new Error("No items left after review — nothing to build.");
+    }
+    statusEl.textContent = `review complete — ${items.length} items. Matching ${photos.length} photos…`;
 
     // ---------- Step 2: process photos in batches, in parallel ----------
     // Batch size 8 with concurrency 3 means we're running 24 photos through
@@ -2029,13 +2371,37 @@ function jnjRenderPreview() {
       }
     });
     card.addEventListener("dragleave", () => card.classList.remove("drag-over"));
+    // v26: item-card drop accepts BOTH cases:
+    //   1. Another lot's thumb (existing behavior) — reassigns photo to this lot
+    //   2. OS file(s) from Finder/Explorer (NEW) — adds photo directly to THIS lot
+    // Case 2 is Ashley's explicit request: dragging in a mid-review missing
+    // photo without going through the AI matcher (which uses QR codes and
+    // would disrupt the whole shift). We route the file into the lot's
+    // itemPhotos array under a synthetic filename prefixed with 'manual-'
+    // so downstream ZIP export sees it like any other photo.
+    card.addEventListener("dragover", (e) => {
+      // If the drag carries files, allow the drop — keep drag-over class on.
+      if (e.dataTransfer.types.includes("Files")) {
+        e.preventDefault();
+        card.classList.add("drag-over");
+      }
+    });
     card.addEventListener("drop", (e) => {
-      if (!e.dataTransfer.types.includes("application/x-jnj-photo")) return;
-      e.preventDefault();
-      card.classList.remove("drag-over");
-      const fname = e.dataTransfer.getData("application/x-jnj-photo");
-      // v25.73: pass the unique row key instead of item_num.
-      jnjMovePhotoTo(fname, it._row_key);
+      // Case 1: existing lot-to-lot photo move.
+      if (e.dataTransfer.types.includes("application/x-jnj-photo")) {
+        e.preventDefault();
+        card.classList.remove("drag-over");
+        const fname = e.dataTransfer.getData("application/x-jnj-photo");
+        jnjMovePhotoTo(fname, it._row_key);
+        return;
+      }
+      // Case 2 (v26): OS file drop from Finder — add to THIS lot only.
+      const files = Array.from(e.dataTransfer.files || []);
+      if (files.length) {
+        e.preventDefault();
+        card.classList.remove("drag-over");
+        jnjAddPhotosToLot(it._row_key, files);
+      }
     });
     // Retry button
     card.querySelector(".jnj-retry-btn").addEventListener("click", () => jnjRetryMatch(it._row_key));
@@ -2138,6 +2504,12 @@ function jnjRenderPreview() {
       e.stopPropagation();
       jnjMovePhotoTo(el.dataset.filename, null);
     });
+    // v26: Make-main button (★)
+    const mm = el.querySelector(".jnj-photo-makemain");
+    if (mm) mm.addEventListener("click", (e) => {
+      e.stopPropagation();
+      jnjMakePhotoMain(el.dataset.filename);
+    });
   });
 }
 
@@ -2147,10 +2519,39 @@ function jnjPhotoThumbHtml(fname, isUnmatched = false) {
   const selected = jnjSelectedPhoto === fname ? " selected" : "";
   const cls = (isUnmatched ? "jnj-photo-thumb unmatched" : "jnj-photo-thumb") + selected;
   const tagBadge = info.tag_read ? ` title="Tag: ${escapeAttr(info.tag_read)}"` : (info.description_read ? ` title="${escapeAttr(info.description_read)}"` : "");
-  return `<div class="${cls}" data-filename="${escapeAttr(fname)}"${tagBadge}>
+  // v26: figure out if THIS is the first (main) photo in its lot so we can
+  // show a MAIN badge and hide the “make main” button for it.
+  let isMain = false;
+  if (!isUnmatched && info.row_key_match) {
+    const bucket = jnjState.itemPhotos[info.row_key_match];
+    if (bucket && bucket[0] === fname) isMain = true;
+  }
+  const mainBadge = isMain ? `<span class="jnj-photo-main-badge" title="This photo is the cover / main photo for this lot">MAIN</span>` : "";
+  const makeMainBtn = (!isUnmatched && !isMain && info.row_key_match)
+    ? `<button class="jnj-photo-makemain" title="Make this the main / cover photo for this lot">★</button>`
+    : "";
+  return `<div class="${cls}${isMain ? ' is-main' : ''}" data-filename="${escapeAttr(fname)}"${tagBadge}>
     <img src="${info.thumb}" alt="" />
+    ${mainBadge}
+    ${makeMainBtn}
     <button class="jnj-photo-remove" title="Remove">×</button>
   </div>`;
+}
+
+// v26: promote a photo to position 0 of its lot (→ becomes the main / cover).
+function jnjMakePhotoMain(fname) {
+  if (!jnjState) return;
+  const info = jnjState.photos.get(fname);
+  if (!info || !info.row_key_match) return;
+  const bucket = jnjState.itemPhotos[info.row_key_match];
+  if (!bucket) return;
+  const idx = bucket.indexOf(fname);
+  if (idx <= 0) return;   // already main or not in bucket
+  bucket.splice(idx, 1);
+  bucket.unshift(fname);
+  const item = jnjState.items.find(i => i._row_key === info.row_key_match);
+  toast(`Set as main photo for ${item ? item.item_num : "lot"}.`);
+  jnjRenderPreview();
 }
 
 // Mobile tap-to-assign: tap a photo to select it, tap an item card to assign.
@@ -2159,6 +2560,7 @@ document.addEventListener("click", (e) => {
   if (!jnjState) return;
   // Ignore remove-button clicks — they have their own handler
   if (e.target.closest(".jnj-photo-remove")) return;
+  if (e.target.closest(".jnj-photo-makemain")) return;   // v26
   // Ignore any actual button/link/input clicks
   if (e.target.closest("button, a, input, textarea, select, label")) return;
 
@@ -2226,6 +2628,76 @@ function jnjMovePhotoTo(fname, target) {
     }
   }
   jnjRenderPreview();
+}
+
+/* -------------------- v26: Add photos to a specific lot from Finder -----
+   Called when the user drops one or more image files from Finder/Explorer
+   directly onto an item card. Skips the AI matcher entirely (Ashley's
+   explicit requirement — the AI matches by QR codes and running it mid-
+   review would disrupt the whole shift). Each dropped file is:
+     - Registered under a synthetic filename ("manual-<random>-<origname>")
+       to avoid collisions with real batch photos of the same name
+     - Turned into a data-URL thumb via FileReader for immediate preview
+     - Added to the target lot's itemPhotos bucket (order: appended)
+     - Made available to the ZIP builder via jnjState.photos.get(fname).file
+   All updates trigger a single jnjRenderPreview() after the last file loads. */
+function jnjAddPhotosToLot(rowKey, files) {
+  if (!jnjState) return;
+  // Filter to real images the browser can render.
+  const usable = files.filter(f => {
+    const n = (f.name || "").toLowerCase();
+    const t = f.type || "";
+    return t.startsWith("image/") || /\.(jpe?g|png|heic|heif|webp)$/i.test(n);
+  });
+  if (!usable.length) {
+    toast("Nothing usable in that drop — need image files.");
+    return;
+  }
+  if (!jnjState.itemPhotos[rowKey]) jnjState.itemPhotos[rowKey] = [];
+  const item = jnjState.items.find(i => i._row_key === rowKey);
+  const lotLabel = item ? (item.item_num || "(lot)") : "(lot)";
+  let pending = usable.length;
+  let added = 0;
+  usable.forEach(file => {
+    // Synthetic filename to prevent collision with existing photo keys.
+    const stamp = Math.random().toString(36).slice(2, 8);
+    const synth = `manual-${stamp}-${file.name || "photo.jpg"}`;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        jnjState.photos.set(synth, {
+          id: `manual-${stamp}`,
+          file: file,
+          thumb: reader.result,       // data:image/jpeg;base64,… for immediate render
+          tag_read: "",
+          description_read: "[manually added]",
+          item_num_match: item ? item.item_num : "",
+          row_key_match: rowKey,
+          match_kind: "manual",
+          dhash: "",
+          is_blank: false,
+        });
+        jnjState.itemPhotos[rowKey].push(synth);
+        added += 1;
+      } catch (err) {
+        console.warn("Failed to add manual photo", file.name, err);
+      }
+      pending -= 1;
+      if (pending === 0) {
+        toast(`Added ${added} photo${added === 1 ? "" : "s"} to ${lotLabel}.`);
+        jnjRenderPreview();
+      }
+    };
+    reader.onerror = () => {
+      console.warn("FileReader failed for", file.name);
+      pending -= 1;
+      if (pending === 0) {
+        toast(`Added ${added} photo${added === 1 ? "" : "s"} to ${lotLabel}.`);
+        jnjRenderPreview();
+      }
+    };
+    reader.readAsDataURL(file);
+  });
 }
 
 // v25.73: takes _row_key (unique per item) as arg. jnjMovePhotoTo still
