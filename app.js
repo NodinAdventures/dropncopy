@@ -3146,3 +3146,216 @@ tryAuth();
 if (!lockScreen.classList.contains("hidden")) {
   passwordInput.focus();
 }
+(function installPhotoOrderGuard() {
+  const installedAt = Date.now();
+
+  function photoKey(photo) {
+    if (!photo) return "";
+    if (typeof photo === "string") return photo;
+    return String(
+      photo.filename ||
+      photo.name ||
+      photo.fileName ||
+      (photo.file && photo.file.name) ||
+      photo.id ||
+      ""
+    );
+  }
+
+  function findPhoto(filename) {
+    if (!window.jnjState || !window.jnjState.photos) return null;
+
+    const photos = window.jnjState.photos;
+
+    if (photos instanceof Map) {
+      return photos.get(filename) || null;
+    }
+
+    if (Array.isArray(photos)) {
+      return photos.find(photo => photoKey(photo) === filename) || null;
+    }
+
+    if (typeof photos === "object") {
+      return photos[filename] || null;
+    }
+
+    return null;
+  }
+
+  function sourceIndex(filename, fallbackIndex) {
+    const photo = findPhoto(filename);
+
+    if (!photo) return fallbackIndex;
+
+    if (Number.isFinite(photo.originalIndex)) {
+      return photo.originalIndex;
+    }
+
+    if (Number.isFinite(photo.sourceIndex)) {
+      return photo.sourceIndex;
+    }
+
+    if (Number.isFinite(photo.uploadIndex)) {
+      return photo.uploadIndex;
+    }
+
+    return fallbackIndex;
+  }
+
+  function getFilename(entry) {
+    if (!entry) return "";
+
+    if (typeof entry === "string") return entry;
+
+    return String(
+      entry.filename ||
+      entry.name ||
+      entry.fileName ||
+      (entry.file && entry.file.name) ||
+      entry.id ||
+      ""
+    );
+  }
+
+  function sortByOriginalOrder(list) {
+    if (!Array.isArray(list)) return list;
+
+    return list
+      .map((entry, currentIndex) => ({
+        entry,
+        currentIndex,
+        filename: getFilename(entry)
+      }))
+      .sort((a, b) => {
+        const aIndex = sourceIndex(a.filename, a.currentIndex);
+        const bIndex = sourceIndex(b.filename, b.currentIndex);
+
+        if (aIndex !== bIndex) return aIndex - bIndex;
+
+        return a.currentIndex - b.currentIndex;
+      })
+      .map(row => row.entry);
+  }
+
+  function assignMissingIndexes() {
+    if (!window.jnjState || !window.jnjState.photos) return;
+
+    const photos = window.jnjState.photos;
+
+    if (photos instanceof Map) {
+      let index = 0;
+
+      for (const [, photo] of photos.entries()) {
+        if (photo && !Number.isFinite(photo.originalIndex)) {
+          photo.originalIndex = index;
+        }
+        index += 1;
+      }
+
+      return;
+    }
+
+    if (Array.isArray(photos)) {
+      photos.forEach((photo, index) => {
+        if (photo && !Number.isFinite(photo.originalIndex)) {
+          photo.originalIndex = index;
+        }
+      });
+
+      return;
+    }
+
+    if (typeof photos === "object") {
+      Object.values(photos).forEach((photo, index) => {
+        if (photo && !Number.isFinite(photo.originalIndex)) {
+          photo.originalIndex = index;
+        }
+      });
+    }
+  }
+
+  function normalizePhotoOrder() {
+    if (!window.jnjState) return;
+
+    assignMissingIndexes();
+
+    const state = window.jnjState;
+
+    /*
+      Item groups may be stored either as:
+      - Map<lotNumber, [filename | photo]>
+      - { [lotNumber]: [filename | photo] }
+    */
+    if (state.itemPhotos instanceof Map) {
+      for (const [itemNumber, photos] of state.itemPhotos.entries()) {
+        state.itemPhotos.set(itemNumber, sortByOriginalOrder(photos));
+      }
+    } else if (state.itemPhotos && typeof state.itemPhotos === "object") {
+      Object.keys(state.itemPhotos).forEach(itemNumber => {
+        state.itemPhotos[itemNumber] = sortByOriginalOrder(
+          state.itemPhotos[itemNumber]
+        );
+      });
+    }
+
+    /*
+      The unmatched pool must also preserve source order.
+    */
+    if (Array.isArray(state.unmatched)) {
+      state.unmatched = sortByOriginalOrder(state.unmatched);
+    }
+
+    /*
+      Some versions keep the complete ordered source list in one
+      of these fields. Sort it too only by its saved source index.
+    */
+    ["ordered", "photoOrder", "sourcePhotos"].forEach(key => {
+      if (Array.isArray(state[key])) {
+        state[key] = sortByOriginalOrder(state[key]);
+      }
+    });
+
+    console.log(
+      "[photo-order-fix] Source order normalized",
+      new Date().toISOString()
+    );
+  }
+
+  function wrapRenderPreview() {
+    if (typeof window.jnjRenderPreview !== "function") {
+      console.warn(
+        "[photo-order-fix] jnjRenderPreview was not found yet; retrying."
+      );
+
+      setTimeout(wrapRenderPreview, 250);
+      return;
+    }
+
+    if (window.jnjRenderPreview.__sourceOrderGuardInstalled) return;
+
+    const originalRenderPreview = window.jnjRenderPreview;
+
+    function guardedRenderPreview(...args) {
+      normalizePhotoOrder();
+      return originalRenderPreview.apply(this, args);
+    }
+
+    guardedRenderPreview.__sourceOrderGuardInstalled = true;
+    guardedRenderPreview.__originalRenderPreview = originalRenderPreview;
+
+    window.jnjRenderPreview = guardedRenderPreview;
+
+    console.log(
+      "[photo-order-fix] Installed. Automatic matching may assign photos, but preview order is preserved."
+    );
+  }
+
+  wrapRenderPreview();
+
+  window.jnjNormalizePhotoOrder = normalizePhotoOrder;
+
+  console.log(
+    "[photo-order-fix] Loaded at",
+    new Date(installedAt).toISOString()
+  );
+})();
