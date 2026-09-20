@@ -265,21 +265,24 @@ def detect_divider_qr(raw_bytes: bytes) -> bool:
                 if _hits_divider(decode(crop_n)):
                     return True
 
-        # v26.9: Pass 8 — Ashley's rule: if a QR is visible AT ALL,
-        # even unreadable, treat it as a divider. Blurry, tilted, glare,
-        # partial — doesn't matter. If OpenCV can see the QR finder
-        # squares, this is a divider photo, full stop. Item photos never
-        # contain a QR by accident, so a false positive here is nearly
-        # impossible.
-        try:
-            if _qr_visually_present(gray2):
-                print(f"QR-DEBUG: QR pattern visible but undecodable — treating as divider", flush=True)
-                return True
-            if _qr_visually_present(gray1):
-                print(f"QR-DEBUG: QR pattern visible at 1024 but undecodable — treating as divider", flush=True)
-                return True
-        except Exception as e:
-            print(f"QR pass8 failed: {type(e).__name__}: {e}", flush=True)
+        # v26.9.1: Pass 8 DISABLED. In v26.9 test on 378-photo sale,
+        # Pass 8's "any visible QR pattern counts" logic false-positived
+        # 29 extra dividers (76 detected vs 47 expected). Item photos
+        # with box edges, shelf corners, or tile patterns triggered the
+        # OpenCV QR detector without a real QR present. Passes 1-7 already
+        # detected the real 50 dividers correctly. Pass 8 stays in the
+        # code for future refinement but is gated off.
+        _PASS_8_ENABLED = False
+        if _PASS_8_ENABLED:
+            try:
+                if _qr_visually_present(gray2):
+                    print(f"QR-DEBUG: QR pattern visible but undecodable — treating as divider", flush=True)
+                    return True
+                if _qr_visually_present(gray1):
+                    print(f"QR-DEBUG: QR pattern visible at 1024 but undecodable — treating as divider", flush=True)
+                    return True
+            except Exception as e:
+                print(f"QR pass8 failed: {type(e).__name__}: {e}", flush=True)
 
         # v26.7: Pass 7 — debug log the FIRST decoded text (whether or
         # not it hit divider) so Ashley can see in the Render log WHY a
