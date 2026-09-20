@@ -197,6 +197,52 @@ def detect_divider_qr(raw_bytes: bytes) -> bool:
             if _hits_divider(decode(cropped)):
                 return True
 
+        # v26.7: Pass 5 — aggressive contrast/threshold passes. Real-world
+        # divider photos of the printed card often fail because of glare,
+        # screen-of-screen (Ashley photographing preview of divider on her
+        # Mac), or dim ambient light. Try three normalizations:
+        #   a) CLAHE contrast-limited adaptive histogram equalization
+        #   b) Otsu binary threshold (pure black/white)
+        #   c) inverted Otsu (in case the QR is white-on-black already)
+        try:
+            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+            g_clahe = clahe.apply(gray2)
+            for decode in (_wechat_decode, _stock_decode):
+                if _hits_divider(decode(g_clahe)):
+                    return True
+            _thr, g_otsu = cv2.threshold(gray2, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            for decode in (_wechat_decode, _stock_decode):
+                if _hits_divider(decode(g_otsu)):
+                    return True
+            _thr, g_inv = cv2.threshold(gray2, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+            for decode in (_wechat_decode, _stock_decode):
+                if _hits_divider(decode(g_inv)):
+                    return True
+        except Exception as e:
+            print(f"QR pass5 failed: {type(e).__name__}: {e}", flush=True)
+
+        # v26.7: Pass 6 — tighter 50% and 40% center crops. When Kim
+        # holds the card close and it fills most of the frame, the QR
+        # itself is centered and huge; a tighter crop keeps only the
+        # QR modules and drops noisy borders.
+        for frac in (0.55, 0.40):
+            crop_n = _center_crop(gray2, frac)
+            for decode in (_wechat_decode, _stock_decode):
+                if _hits_divider(decode(crop_n)):
+                    return True
+
+        # v26.7: Pass 7 — debug log the FIRST decoded text (whether or
+        # not it hit divider) so Ashley can see in the Render log WHY a
+        # given photo missed. Runs only on final failure, cheap.
+        try:
+            probe = _wechat_decode(gray2) or _stock_decode(gray2)
+            if probe:
+                print(f"QR-DEBUG: decoded but didn't match divider: {probe!r}", flush=True)
+            else:
+                print(f"QR-DEBUG: no QR decoded after 7 passes", flush=True)
+        except Exception:
+            pass
+
         return False
     except Exception as e:
         print(f"QR detect failed: {type(e).__name__}: {e}", flush=True)
