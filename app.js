@@ -3359,3 +3359,58 @@ if (!lockScreen.classList.contains("hidden")) {
     new Date(installedAt).toISOString()
   );
 })();
+
+window.jnjScanDividerQrLocally = async function jnjScanDividerQrLocally(file) {
+  if (!file || !/^image\//i.test(file.type || "")) return false;
+
+  if (typeof jsQR !== "function") {
+    console.warn("[fast-qr] jsQR library did not load.");
+    return false;
+  }
+
+  try {
+    const bitmap = await createImageBitmap(file);
+    const maxSide = 900;
+    const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
+
+    const width = Math.max(1, Math.round(bitmap.width * scale));
+    const height = Math.max(1, Math.round(bitmap.height * scale));
+
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    ctx.drawImage(bitmap, 0, 0, width, height);
+
+    if (typeof bitmap.close === "function") bitmap.close();
+
+    const imageData = ctx.getImageData(0, 0, width, height);
+
+    const result = jsQR(
+      imageData.data,
+      imageData.width,
+      imageData.height,
+      { inversionAttempts: "attemptBoth" }
+    );
+
+    const text = result && result.data ? String(result.data).trim() : "";
+
+    const isDivider =
+      /DROPNCOPY/i.test(text) ||
+      /DIVIDER/i.test(text) ||
+      /JNJ[-_\s]*DIVIDER/i.test(text);
+
+    console.log(
+      "[fast-qr]",
+      file.name,
+      isDivider ? "DIVIDER" : "photo",
+      text || "(no QR)"
+    );
+
+    return isDivider;
+  } catch (error) {
+    console.warn("[fast-qr] scan failed:", file.name, error);
+    return false;
+  }
+};
