@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-09-20-v26.8-client-parallel-6";
+const BUILD_ID = "2026-09-20-v26.8.1-parallel-4";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v26.8 boot. BUILD_ID:", "2026-09-20-v26.8-client-parallel-6");
+jnjLog("BOOT", "v26.8.1 boot. BUILD_ID:", "2026-09-20-v26.8.1-parallel-4");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -87,8 +87,12 @@ const JNJ_MATCH_PHOTOS_URL = "__PORT_5000__".startsWith("__")
 // the server bumped to 8. 6 × 10 = 60 in flight, still safe with Render's
 // per-request queue and the retry logic. If a huge sale flakes, drop
 // this back to 3 in one line.
+// v26.8.1: 6 pinned Render's 1 CPU — even /api/jnj-diag heartbeats
+// stopped responding during a 378-photo build. Backing off to 4. Still
+// 33% faster than v26.7's 3, but leaves the CPU room to breathe so the
+// UI stays alive.
 const JNJ_PHOTO_BATCH_SIZE = 10;
-const JNJ_PHOTO_CONCURRENCY = 6; // Number of batches to run in parallel.
+const JNJ_PHOTO_CONCURRENCY = 4; // Number of batches to run in parallel.
 const JNJ_REMATCH_URL = "__PORT_5000__".startsWith("__")
   ? "/api/jnj-rematch"
   : "__PORT_5000__/api/jnj-rematch";
@@ -1604,7 +1608,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v26.8 · ${BUILD_ID}`;
+  badge.textContent = `v26.8.1 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
@@ -1669,9 +1673,9 @@ try {
       const b = Number(j.key_b_active_builds || 0);
       const lbOn = Boolean(j.load_balancer_enabled);
       if (lbOn) {
-        badge.textContent = `v26.8 · A:${a} B:${b}`;
+        badge.textContent = `v26.8.1 · A:${a} B:${b}`;
       } else {
-        badge.textContent = `v26.8 · A:${a} (single key)`;
+        badge.textContent = `v26.8.1 · A:${a} (single key)`;
       }
     } catch {}
   }

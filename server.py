@@ -694,7 +694,11 @@ Do NOT add commentary, do NOT add a "Transcription:" header, do NOT add column l
 # tier-1+ accounts can do dozens of concurrent requests, and the OpenAI
 # side has its own request queue if we exceed the true limit — so 8 is
 # still safe. Ashley’s target is under 2 min for a mid-size sale.
-MAX_CONCURRENT = 8
+# v26.8.1: paired with client concurrency 4 (down from 6). 4 clients ×
+# 10 photos batch = 40 in flight; server-side 6 concurrent OpenAI calls
+# handles them without pinning the 1-CPU Render box. Prior 6/8 combo
+# killed even /api/jnj-diag heartbeats mid-build.
+MAX_CONCURRENT = 6
 
 
 # v25.77: Unjam telemetry. Every time a call to OpenAI fails with a
