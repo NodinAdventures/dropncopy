@@ -2010,72 +2010,29 @@ async function jnjHandleFiles(input) {
     // Batch size 8 with concurrency 3 means we're running 24 photos through
     // OpenAI simultaneously, which is well under any rate limit and dramatically
     // faster than the old sequential 3-at-a-time approach.
-    const batches = [];
-    for (let i = 0; i < photos.length; i += JNJ_PHOTO_BATCH_SIZE) {
-      batches.push(photos.slice(i, i + JNJ_PHOTO_BATCH_SIZE));
-    }
-    const itemsJson = JSON.stringify(items);
-    const results = new Array(batches.length); // Store by index to preserve order.
-    let completedBatches = 0;
-
-    // v25.72: wrap each batch in a client-side retry loop that shows a
-    // visible "OpenAI slow, retrying…" status. When OpenAI is flaky, the
-    // server-side _openai_with_retry may still exhaust its 8 attempts and
-    // return a 500; this catches that and retries the whole batch up to 3
-    // more times with a growing pause. Total worst-case: server 8 retries
-    // + client 3 retries = ~11 attempts before we give up on a batch.
-    const CLIENT_BATCH_RETRIES = 3;
-    const runBatch = async (batchIdx) => {
-      const label = `Photo batch ${batchIdx + 1}/${batches.length}`;
-      let lastErr = null;
-      for (let attempt = 1; attempt <= CLIENT_BATCH_RETRIES + 1; attempt++) {
-        try {
-          const fd = new FormData();
-          for (const p of batches[batchIdx]) fd.append("photos", p);
-          fd.append("items_json", itemsJson);
-          const batchData = await postForJson(JNJ_MATCH_PHOTOS_URL, fd, label);
-          results[batchIdx] = batchData.photos || [];
-          completedBatches++;
-          statusEl.textContent = `matching photos… ${completedBatches} of ${batches.length} batches done`;
-          return;
-        } catch (err) {
-          lastErr = err;
-          if (attempt > CLIENT_BATCH_RETRIES) break;
-          const waitSec = attempt * 10; // 10s, 20s, 30s
-          statusEl.textContent = `OpenAI slow — retrying batch ${batchIdx + 1}/${batches.length} in ${waitSec}s (attempt ${attempt + 1} of ${CLIENT_BATCH_RETRIES + 1})…`;
-          console.warn(`${label} failed on attempt ${attempt}/${CLIENT_BATCH_RETRIES + 1}; retrying in ${waitSec}s. Error:`, err.message);
-          await new Promise(r => setTimeout(r, waitSec * 1000));
-        }
-      }
-      throw lastErr;
-    };
-
-    // Run batches with a concurrency limit — keeps at most JNJ_PHOTO_CONCURRENCY
-    // requests in flight at any time. Simpler than a full pool implementation:
-    // we start N workers that each pull the next available batch index.
-    let nextBatch = 0;
-    const worker = async () => {
-      while (true) {
-        const idx = nextBatch++;
-        if (idx >= batches.length) return;
-        await runBatch(idx);
-      }
-    };
-    const workers = [];
-    for (let w = 0; w < Math.min(JNJ_PHOTO_CONCURRENCY, batches.length); w++) {
-      workers.push(worker());
-    }
-    await Promise.all(workers);
-
-    // Flatten results in the original batch order and re-index photo ids.
+    // Step 2: scan each photo locally for the printed DROPNCOPY divider QR.
+    // No OpenAI photo matching, batches, server calls, or retries.
     const allPhotoInfos = [];
-    for (const batchResults of results) {
-      if (!batchResults) continue;
-      for (const p of batchResults) {
-        p.id = `p${allPhotoInfos.length}`;
-        allPhotoInfos.push(p);
+
+    for (let i = 0; i < photos.length; i++) {
+      const photo = photos[i];
+
+      statusEl.textContent = `scanning QR dividers… ${i + 1} of ${photos.length} photos`;
+
+      let hasDividerQr = false;
+      try {
+        hasDividerQr = await window.jnjScanDividerQrLocally(photo);
+      } catch (err) {
+        console.warn(`Local QR scan failed for ${photo.name}; treating as an item photo.`, err);
       }
+
+      allPhotoInfos.push({
+        id: `p${i}`,
+        filename: photo.name,
+        hasdividerqr: hasDividerQr === true
+      });
     }
+
 
     statusEl.textContent = `done — ${items.length} items, ${allPhotoInfos.length} photos`;
     li.querySelector(".spinner").outerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color: var(--success); flex-shrink:0;"><polyline points="20 6 9 17 4 12"/></svg>`;
