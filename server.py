@@ -685,7 +685,12 @@ Do NOT add commentary, do NOT add a "Transcription:" header, do NOT add column l
 # v25.76: reverted to 3, matching what worked reliably for weeks. Trading
 # a small amount of good-day throughput for predictable behavior on
 # bad OpenAI days. Boring wins.
-MAX_CONCURRENT = 3
+# v26.7: Ashley wants full sales under 2 minutes. Bumping to 5 — modest
+# ~40% throughput gain, still well below the rate-limit ceiling for a
+# single OpenAI account. If bad-day timeouts return, the manual restart
+# button + jam detector cover us; if 5 becomes a problem we can drop it
+# back to 3 in one line.
+MAX_CONCURRENT = 5
 
 
 # v25.77: Unjam telemetry. Every time a call to OpenAI fails with a
