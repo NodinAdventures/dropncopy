@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-09-20-v26.2-review-columns";
+const BUILD_ID = "2026-09-20-v26.5-sheet-seller-header";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v26.2 boot. BUILD_ID:", "2026-09-20-v26.2-review-columns");
+jnjLog("BOOT", "v26.5 boot. BUILD_ID:", "2026-09-20-v26.5-sheet-seller-header");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -192,6 +192,7 @@ function openTextReviewModal(itemsIn) {
           <span class="jnj-review-hint-item"><span class="tool-swatch merge">↑</span> Merge into row above</span>
           <span class="jnj-review-hint-item"><span class="tool-swatch split">↲</span> Split into two rows</span>
           <span class="jnj-review-hint-item"><span class="tool-swatch delete">×</span> Delete row</span>
+          <span class="jnj-review-hint-item" style="color:#0f766e;">✎ Misspelled words show a red underline in Description</span>
           <span class="jnj-review-count" data-role="count"></span>
         </div>
         <div class="jnj-review-body">
@@ -226,9 +227,33 @@ function openTextReviewModal(itemsIn) {
     const countEl = overlay.querySelector('[data-role="count"]');
 
     // ---- Render all rows ----
+    // v26.5: insert a sheet-header row before each sheet's first row.
+    // The header shows "Sheet N — Seller: [__input__] Apply to all" so Ashley
+    // can type the boxed seller # ONCE per sheet and stamp every row on that
+    // sheet in a single click.
     function renderRows() {
       rowsEl.innerHTML = "";
+      let lastSheetIdx = null;
       working.forEach((row, idx) => {
+        // Insert sheet-header row when sheet_index changes.
+        const curSheet = (row.sheet_index !== undefined && row.sheet_index !== null) ? row.sheet_index : 0;
+        if (curSheet !== lastSheetIdx) {
+          lastSheetIdx = curSheet;
+          // Find current seller across this sheet (first non-blank wins as the display default).
+          const sameSheetRows = working.filter(r => (r.sheet_index === row.sheet_index));
+          const firstSeller = (sameSheetRows.find(r => (r.sheet_seller_num || "").toString().trim()) || {}).sheet_seller_num || "";
+          const headerTr = document.createElement("tr");
+          headerTr.className = "jnj-review-sheet-header";
+          headerTr.innerHTML = `
+            <td colspan="6" style="background:#f1f5f9; border-top:2px solid #94a3b8; padding:8px 10px;">
+              <strong style="color:#0f172a;">Sheet ${curSheet + 1}</strong>
+              <span style="margin-left:12px; color:#475569;">Seller (boxed number at top):</span>
+              <input type="text" data-role="sheet-seller-input" data-sheet-idx="${curSheet}" value="${_escAttr(firstSeller)}" placeholder="e.g. 456" style="margin-left:6px; padding:4px 8px; border:1px solid #cbd5e1; border-radius:6px; width:110px; font-family:ui-monospace, Menlo, monospace; font-size:13px;" />
+              <button type="button" data-role="sheet-seller-apply" data-sheet-idx="${curSheet}" style="margin-left:6px; padding:4px 10px; border:1px solid #0f766e; background:#0f766e; color:#fff; border-radius:6px; font-size:12px; cursor:pointer;">Apply to all rows on this sheet</button>
+              <span style="margin-left:12px; color:#64748b; font-size:12px;">${sameSheetRows.length} row${sameSheetRows.length === 1 ? "" : "s"}</span>
+            </td>`;
+          rowsEl.appendChild(headerTr);
+        }
         const tr = document.createElement("tr");
         tr.dataset.rowKey = row._row_key;
         // Item # cell — editable, monospace, small.
@@ -254,8 +279,11 @@ function openTextReviewModal(itemsIn) {
         tr.appendChild(sellerTd);
 
         // Description — textarea so long descriptions grow, spellcheck=true.
+        // v26.3: added lang="en" + autocorrect/autocapitalize hints so Safari
+        // and Chrome actually engage the browser spell dictionary. Without
+        // an explicit lang, some browsers skip spellchecking in overlays.
         const descTd = document.createElement("td");
-        descTd.innerHTML = `<textarea class="jnj-review-input desc" spellcheck="true" rows="1">${_escText(row.description)}</textarea>`;
+        descTd.innerHTML = `<textarea class="jnj-review-input desc" spellcheck="true" lang="en" autocorrect="on" autocapitalize="sentences" rows="1">${_escText(row.description)}</textarea>`;
         tr.appendChild(descTd);
 
         // Tools cell — Merge ↑, Split ↲, Delete ×.
@@ -341,6 +369,25 @@ function openTextReviewModal(itemsIn) {
       document.body.style.overflow = "";
       try { overlay.remove(); } catch {}
     }
+    // v26.5: Apply-to-sheet handler for the Seller field in sheet header rows.
+    // Reads the header's <input>, stamps sheet_seller_num onto every working
+    // row with matching sheet_index, then re-renders so per-row inputs update.
+    overlay.addEventListener("click", (e) => {
+      const applyBtn = e.target.closest('button[data-role="sheet-seller-apply"]');
+      if (!applyBtn) return;
+      const sheetIdx = parseInt(applyBtn.dataset.sheetIdx, 10);
+      const input = overlay.querySelector(`input[data-role="sheet-seller-input"][data-sheet-idx="${sheetIdx}"]`);
+      const val = (input.value || "").toString().trim().toUpperCase().replace(/\s+/g, "");
+      let stamped = 0;
+      for (const r of working) {
+        if (r.sheet_index === sheetIdx) {
+          r.sheet_seller_num = val;
+          stamped += 1;
+        }
+      }
+      renderRows();
+      toast(`Stamped seller "${val || "(blank)"}" onto ${stamped} row${stamped === 1 ? "" : "s"} on sheet ${sheetIdx + 1}.`);
+    });
     overlay.addEventListener("click", (e) => {
       const btn = e.target.closest("button[data-action]");
       if (!btn) return;
@@ -1552,7 +1599,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v26.2 · ${BUILD_ID}`;
+  badge.textContent = `v26.5 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
@@ -1580,9 +1627,9 @@ try {
       const b = Number(j.key_b_active_builds || 0);
       const lbOn = Boolean(j.load_balancer_enabled);
       if (lbOn) {
-        badge.textContent = `v26.2 · A:${a} B:${b}`;
+        badge.textContent = `v26.5 · A:${a} B:${b}`;
       } else {
-        badge.textContent = `v26.2 · A:${a} (single key)`;
+        badge.textContent = `v26.5 · A:${a} (single key)`;
       }
     } catch {}
   }
@@ -1871,6 +1918,35 @@ async function jnjHandleFiles(input) {
     // openTextReviewModal returns a Promise that resolves with the
     // (possibly edited) items array. If Dave hits Cancel, it rejects
     // and we abort the whole build.
+    // v26.4: Before opening the review modal, inherit seller # down.
+    // If the AI misses a boxed seller mark in the middle of a sheet, the
+    // AI leaves that row blank — but the item still belongs to whichever
+    // seller was active most recently. So we walk each sheet, and for any
+    // row with a blank seller, fill from the previous non-blank row on the
+    // SAME sheet. Never carry across sheet boundaries.
+    {
+      const bySheet = new Map();
+      for (const it of items) {
+        const k = (it.sheet_index !== undefined) ? it.sheet_index : 0;
+        if (!bySheet.has(k)) bySheet.set(k, []);
+        bySheet.get(k).push(it);
+      }
+      let filled = 0;
+      for (const [sheetIdx, rows] of bySheet) {
+        let lastSeller = "";
+        for (const r of rows) {
+          const cur = (r.sheet_seller_num || "").toString().trim();
+          if (cur) {
+            lastSeller = cur;
+          } else if (lastSeller) {
+            r.sheet_seller_num = lastSeller;
+            filled += 1;
+          }
+        }
+      }
+      if (filled) jnjLog("SELLER-FILL", `filled ${filled} blank seller cells by carrying down`);
+    }
+
     statusEl.textContent = "waiting for text review…";
     let reviewedItems;
     try {
