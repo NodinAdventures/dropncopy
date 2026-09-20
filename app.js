@@ -2010,29 +2010,72 @@ async function jnjHandleFiles(input) {
     // Batch size 8 with concurrency 3 means we're running 24 photos through
     // OpenAI simultaneously, which is well under any rate limit and dramatically
     // faster than the old sequential 3-at-a-time approach.
-    // Step 2: scan each photo locally for the printed DROPNCOPY divider QR.
-    // No OpenAI photo matching, batches, server calls, or retries.
-    const allPhotoInfos = [];
-
-    for (let i = 0; i < photos.length; i++) {
-      const photo = photos[i];
-
-      statusEl.textContent = `scanning QR dividers… ${i + 1} of ${photos.length} photos`;
-
-      let hasDividerQr = false;
-      try {
-        hasDividerQr = await window.jnjScanDividerQrLocally(photo);
-      } catch (err) {
-        console.warn(`Local QR scan failed for ${photo.name}; treating as an item photo.`, err);
-      }
-
-      allPhotoInfos.push({
-        id: `p${i}`,
-        filename: photo.name,
-        hasdividerqr: hasDividerQr === true
-      });
+    const batches = [];
+    for (let i = 0; i < photos.length; i += JNJ_PHOTO_BATCH_SIZE) {
+      batches.push(photos.slice(i, i + JNJ_PHOTO_BATCH_SIZE));
     }
+    const itemsJson = JSON.stringify(items);
+    const results = new Array(batches.length); // Store by index to preserve order.
+    let completedBatches = 0;
 
+    // v25.72: wrap each batch in a client-side retry loop that shows a
+    // visible "OpenAI slow, retrying…" status. When OpenAI is flaky, the
+    // server-side _openai_with_retry may still exhaust its 8 attempts and
+    // return a 500; this catches that and retries the whole batch up to 3
+    // more times with a growing pause. Total worst-case: server 8 retries
+    // + client 3 retries = ~11 attempts before we give up on a batch.
+    const CLIENT_BATCH_RETRIES = 3;
+    const runBatch = async (batchIdx) => {
+      const label = `Photo batch ${batchIdx + 1}/${batches.length}`;
+      let lastErr = null;
+      for (let attempt = 1; attempt <= CLIENT_BATCH_RETRIES + 1; attempt++) {
+        try {
+          const fd = new FormData();
+          for (const p of batches[batchIdx]) fd.append("photos", p);
+          fd.append("items_json", itemsJson);
+          const batchData = await postForJson(JNJ_MATCH_PHOTOS_URL, fd, label);
+          results[batchIdx] = batchData.photos || [];
+          completedBatches++;
+          statusEl.textContent = `matching photos… ${completedBatches} of ${batches.length} batches done`;
+          return;
+        } catch (err) {
+          lastErr = err;
+          if (attempt > CLIENT_BATCH_RETRIES) break;
+          const waitSec = attempt * 10; // 10s, 20s, 30s
+          statusEl.textContent = `OpenAI slow — retrying batch ${batchIdx + 1}/${batches.length} in ${waitSec}s (attempt ${attempt + 1} of ${CLIENT_BATCH_RETRIES + 1})…`;
+          console.warn(`${label} failed on attempt ${attempt}/${CLIENT_BATCH_RETRIES + 1}; retrying in ${waitSec}s. Error:`, err.message);
+          await new Promise(r => setTimeout(r, waitSec * 1000));
+        }
+      }
+      throw lastErr;
+    };
+
+    // Run batches with a concurrency limit — keeps at most JNJ_PHOTO_CONCURRENCY
+    // requests in flight at any time. Simpler than a full pool implementation:
+    // we start N workers that each pull the next available batch index.
+    let nextBatch = 0;
+    const worker = async () => {
+      while (true) {
+        const idx = nextBatch++;
+        if (idx >= batches.length) return;
+        await runBatch(idx);
+      }
+    };
+    const workers = [];
+    for (let w = 0; w < Math.min(JNJ_PHOTO_CONCURRENCY, batches.length); w++) {
+      workers.push(worker());
+    }
+    await Promise.all(workers);
+
+    // Flatten results in the original batch order and re-index photo ids.
+    const allPhotoInfos = [];
+    for (const batchResults of results) {
+      if (!batchResults) continue;
+      for (const p of batchResults) {
+        p.id = `p${allPhotoInfos.length}`;
+        allPhotoInfos.push(p);
+      }
+    }
 
     statusEl.textContent = `done — ${items.length} items, ${allPhotoInfos.length} photos`;
     li.querySelector(".spinner").outerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color: var(--success); flex-shrink:0;"><polyline points="20 6 9 17 4 12"/></svg>`;
@@ -3103,271 +3146,3 @@ tryAuth();
 if (!lockScreen.classList.contains("hidden")) {
   passwordInput.focus();
 }
-(function installPhotoOrderGuard() {
-  const installedAt = Date.now();
-
-  function photoKey(photo) {
-    if (!photo) return "";
-    if (typeof photo === "string") return photo;
-    return String(
-      photo.filename ||
-      photo.name ||
-      photo.fileName ||
-      (photo.file && photo.file.name) ||
-      photo.id ||
-      ""
-    );
-  }
-
-  function findPhoto(filename) {
-    if (!window.jnjState || !window.jnjState.photos) return null;
-
-    const photos = window.jnjState.photos;
-
-    if (photos instanceof Map) {
-      return photos.get(filename) || null;
-    }
-
-    if (Array.isArray(photos)) {
-      return photos.find(photo => photoKey(photo) === filename) || null;
-    }
-
-    if (typeof photos === "object") {
-      return photos[filename] || null;
-    }
-
-    return null;
-  }
-
-  function sourceIndex(filename, fallbackIndex) {
-    const photo = findPhoto(filename);
-
-    if (!photo) return fallbackIndex;
-
-    if (Number.isFinite(photo.originalIndex)) {
-      return photo.originalIndex;
-    }
-
-    if (Number.isFinite(photo.sourceIndex)) {
-      return photo.sourceIndex;
-    }
-
-    if (Number.isFinite(photo.uploadIndex)) {
-      return photo.uploadIndex;
-    }
-
-    return fallbackIndex;
-  }
-
-  function getFilename(entry) {
-    if (!entry) return "";
-
-    if (typeof entry === "string") return entry;
-
-    return String(
-      entry.filename ||
-      entry.name ||
-      entry.fileName ||
-      (entry.file && entry.file.name) ||
-      entry.id ||
-      ""
-    );
-  }
-
-  function sortByOriginalOrder(list) {
-    if (!Array.isArray(list)) return list;
-
-    return list
-      .map((entry, currentIndex) => ({
-        entry,
-        currentIndex,
-        filename: getFilename(entry)
-      }))
-      .sort((a, b) => {
-        const aIndex = sourceIndex(a.filename, a.currentIndex);
-        const bIndex = sourceIndex(b.filename, b.currentIndex);
-
-        if (aIndex !== bIndex) return aIndex - bIndex;
-
-        return a.currentIndex - b.currentIndex;
-      })
-      .map(row => row.entry);
-  }
-
-  function assignMissingIndexes() {
-    if (!window.jnjState || !window.jnjState.photos) return;
-
-    const photos = window.jnjState.photos;
-
-    if (photos instanceof Map) {
-      let index = 0;
-
-      for (const [, photo] of photos.entries()) {
-        if (photo && !Number.isFinite(photo.originalIndex)) {
-          photo.originalIndex = index;
-        }
-        index += 1;
-      }
-
-      return;
-    }
-
-    if (Array.isArray(photos)) {
-      photos.forEach((photo, index) => {
-        if (photo && !Number.isFinite(photo.originalIndex)) {
-          photo.originalIndex = index;
-        }
-      });
-
-      return;
-    }
-
-    if (typeof photos === "object") {
-      Object.values(photos).forEach((photo, index) => {
-        if (photo && !Number.isFinite(photo.originalIndex)) {
-          photo.originalIndex = index;
-        }
-      });
-    }
-  }
-
-  function normalizePhotoOrder() {
-    if (!window.jnjState) return;
-
-    assignMissingIndexes();
-
-    const state = window.jnjState;
-
-    /*
-      Item groups may be stored either as:
-      - Map<lotNumber, [filename | photo]>
-      - { [lotNumber]: [filename | photo] }
-    */
-    if (state.itemPhotos instanceof Map) {
-      for (const [itemNumber, photos] of state.itemPhotos.entries()) {
-        state.itemPhotos.set(itemNumber, sortByOriginalOrder(photos));
-      }
-    } else if (state.itemPhotos && typeof state.itemPhotos === "object") {
-      Object.keys(state.itemPhotos).forEach(itemNumber => {
-        state.itemPhotos[itemNumber] = sortByOriginalOrder(
-          state.itemPhotos[itemNumber]
-        );
-      });
-    }
-
-    /*
-      The unmatched pool must also preserve source order.
-    */
-    if (Array.isArray(state.unmatched)) {
-      state.unmatched = sortByOriginalOrder(state.unmatched);
-    }
-
-    /*
-      Some versions keep the complete ordered source list in one
-      of these fields. Sort it too only by its saved source index.
-    */
-    ["ordered", "photoOrder", "sourcePhotos"].forEach(key => {
-      if (Array.isArray(state[key])) {
-        state[key] = sortByOriginalOrder(state[key]);
-      }
-    });
-
-    console.log(
-      "[photo-order-fix] Source order normalized",
-      new Date().toISOString()
-    );
-  }
-
-  function wrapRenderPreview() {
-    if (typeof window.jnjRenderPreview !== "function") {
-      console.warn(
-        "[photo-order-fix] jnjRenderPreview was not found yet; retrying."
-      );
-
-      setTimeout(wrapRenderPreview, 250);
-      return;
-    }
-
-    if (window.jnjRenderPreview.__sourceOrderGuardInstalled) return;
-
-    const originalRenderPreview = window.jnjRenderPreview;
-
-    function guardedRenderPreview(...args) {
-      normalizePhotoOrder();
-      return originalRenderPreview.apply(this, args);
-    }
-
-    guardedRenderPreview.__sourceOrderGuardInstalled = true;
-    guardedRenderPreview.__originalRenderPreview = originalRenderPreview;
-
-    window.jnjRenderPreview = guardedRenderPreview;
-
-    console.log(
-      "[photo-order-fix] Installed. Automatic matching may assign photos, but preview order is preserved."
-    );
-  }
-
-  wrapRenderPreview();
-
-  window.jnjNormalizePhotoOrder = normalizePhotoOrder;
-
-  console.log(
-    "[photo-order-fix] Loaded at",
-    new Date(installedAt).toISOString()
-  );
-})();
-
-window.jnjScanDividerQrLocally = async function jnjScanDividerQrLocally(file) {
-  if (!file || !/^image\//i.test(file.type || "")) return false;
-
-  if (typeof jsQR !== "function") {
-    console.warn("[fast-qr] jsQR library did not load.");
-    return false;
-  }
-
-  try {
-    const bitmap = await createImageBitmap(file);
-    const maxSide = 900;
-    const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
-
-    const width = Math.max(1, Math.round(bitmap.width * scale));
-    const height = Math.max(1, Math.round(bitmap.height * scale));
-
-    const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-
-    const ctx = canvas.getContext("2d", { willReadFrequently: true });
-    ctx.drawImage(bitmap, 0, 0, width, height);
-
-    if (typeof bitmap.close === "function") bitmap.close();
-
-    const imageData = ctx.getImageData(0, 0, width, height);
-
-    const result = jsQR(
-      imageData.data,
-      imageData.width,
-      imageData.height,
-      { inversionAttempts: "attemptBoth" }
-    );
-
-    const text = result && result.data ? String(result.data).trim() : "";
-
-    const isDivider =
-      /DROPNCOPY/i.test(text) ||
-      /DIVIDER/i.test(text) ||
-      /JNJ[-_\s]*DIVIDER/i.test(text);
-
-    console.log(
-      "[fast-qr]",
-      file.name,
-      isDivider ? "DIVIDER" : "photo",
-      text || "(no QR)"
-    );
-
-    return isDivider;
-  } catch (error) {
-    console.warn("[fast-qr] scan failed:", file.name, error);
-    return false;
-  }
-};
