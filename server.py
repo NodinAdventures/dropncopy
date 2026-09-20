@@ -90,6 +90,40 @@ def _stock_decode(arr) -> str:
     return ""
 
 
+def _qr_visually_present(arr) -> bool:
+    """v26.9: Return True if any QR-like pattern is visible in the frame,
+    even if it can't be decoded. Ashley's rule: if the QR shows AT ALL,
+    it counts as a divider — blurry, tilted, partial, doesn't matter.
+
+    Uses OpenCV's detect() (not detectAndDecode) which only needs to see
+    the three finder squares in the corners of a QR. Much more forgiving
+    than requiring a full decode.
+    """
+    # Try WeChat first — it also returns points on partial finds.
+    if _HAS_WECHAT and _WECHAT_QR is not None:
+        try:
+            _results, points = _WECHAT_QR.detectAndDecode(arr)
+            if points is not None and len(points) > 0:
+                return True
+        except Exception:
+            pass
+    # Fall back to stock detector's detect() — finds finder squares.
+    if _QR_DETECTOR is not None:
+        try:
+            found, _pts = _QR_DETECTOR.detect(arr)
+            if found:
+                return True
+        except Exception:
+            pass
+        try:
+            found, _pts = _QR_DETECTOR.detectMulti(arr)
+            if found:
+                return True
+        except Exception:
+            pass
+    return False
+
+
 def _try_all_detectors(arr) -> str:
     """Try WeChat first (much better), then stock as fallback."""
     text = _wechat_decode(arr)
@@ -231,6 +265,22 @@ def detect_divider_qr(raw_bytes: bytes) -> bool:
                 if _hits_divider(decode(crop_n)):
                     return True
 
+        # v26.9: Pass 8 — Ashley's rule: if a QR is visible AT ALL,
+        # even unreadable, treat it as a divider. Blurry, tilted, glare,
+        # partial — doesn't matter. If OpenCV can see the QR finder
+        # squares, this is a divider photo, full stop. Item photos never
+        # contain a QR by accident, so a false positive here is nearly
+        # impossible.
+        try:
+            if _qr_visually_present(gray2):
+                print(f"QR-DEBUG: QR pattern visible but undecodable — treating as divider", flush=True)
+                return True
+            if _qr_visually_present(gray1):
+                print(f"QR-DEBUG: QR pattern visible at 1024 but undecodable — treating as divider", flush=True)
+                return True
+        except Exception as e:
+            print(f"QR pass8 failed: {type(e).__name__}: {e}", flush=True)
+
         # v26.7: Pass 7 — debug log the FIRST decoded text (whether or
         # not it hit divider) so Ashley can see in the Render log WHY a
         # given photo missed. Runs only on final failure, cheap.
@@ -239,7 +289,7 @@ def detect_divider_qr(raw_bytes: bytes) -> bool:
             if probe:
                 print(f"QR-DEBUG: decoded but didn't match divider: {probe!r}", flush=True)
             else:
-                print(f"QR-DEBUG: no QR decoded after 7 passes", flush=True)
+                print(f"QR-DEBUG: no QR decoded after 8 passes", flush=True)
         except Exception:
             pass
 
@@ -699,6 +749,16 @@ Do NOT add commentary, do NOT add a "Transcription:" header, do NOT add column l
 # handles them without pinning the 1-CPU Render box. Prior 6/8 combo
 # killed even /api/jnj-diag heartbeats mid-build.
 MAX_CONCURRENT = 6
+
+# v26.9: QR-ONLY MODE. Ashley's actual workflow doesn't have printed lot
+# numbers on tags — dividers are the only signal we need. When True, we
+# ONLY scan each photo for the DROPNCOPY-DIVIDER QR code and skip the
+# AI "DIVIDER vs ITEM" fallback entirely. This drops per-photo cost from
+# 2-5 seconds down to 50-200ms. Photos without a divider QR are treated
+# as regular item photos, no AI second-guessing. If a real sale ever
+# needs the AI classifier back, flip this to False in one line — the
+# old code path is preserved.
+QR_ONLY_MODE = True
 
 
 # v25.77: Unjam telemetry. Every time a call to OpenAI fails with a
@@ -2622,6 +2682,10 @@ async def jnj_match_photos(
             # cost the same as before.
             if has_divider_qr:
                 # Already decided by QR — skip everything below.
+                pass
+            elif QR_ONLY_MODE:
+                # v26.9: QR-only mode. No QR means item photo. Period. No AI
+                # second-guessing. This is the fast path Ashley wants.
                 pass
             elif divider_score >= 850:
                 # Skip AI call — unambiguously a divider. Score alone decides.
