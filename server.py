@@ -690,7 +690,11 @@ Do NOT add commentary, do NOT add a "Transcription:" header, do NOT add column l
 # single OpenAI account. If bad-day timeouts return, the manual restart
 # button + jam detector cover us; if 5 becomes a problem we can drop it
 # back to 3 in one line.
-MAX_CONCURRENT = 5
+# v26.8: 5 was still slow on a real sale. Bumping to 8. gpt-4o-mini
+# tier-1+ accounts can do dozens of concurrent requests, and the OpenAI
+# side has its own request queue if we exceed the true limit — so 8 is
+# still safe. Ashley’s target is under 2 min for a mid-size sale.
+MAX_CONCURRENT = 8
 
 
 # v25.77: Unjam telemetry. Every time a call to OpenAI fails with a
