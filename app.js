@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-09-20-v26.8-concurrency-8";
+const BUILD_ID = "2026-09-20-v26.8-client-parallel-6";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v26.8 boot. BUILD_ID:", "2026-09-20-v26.8-concurrency-8");
+jnjLog("BOOT", "v26.8 boot. BUILD_ID:", "2026-09-20-v26.8-client-parallel-6");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -82,8 +82,13 @@ const JNJ_MATCH_PHOTOS_URL = "__PORT_5000__".startsWith("__")
 // Photos in a batch run concurrently on the server, so what matters is how
 // many photos we let hit the API at once. 10 per batch, 3 batches concurrent
 // = 30 in flight, well under OpenAI's rate limit and Render's 512MB RAM.
+// v26.8: bumped CLIENT concurrency 3 → 6. Real bottleneck on Ashley's
+// 378-photo sale was the client only firing 3 batches at once even though
+// the server bumped to 8. 6 × 10 = 60 in flight, still safe with Render's
+// per-request queue and the retry logic. If a huge sale flakes, drop
+// this back to 3 in one line.
 const JNJ_PHOTO_BATCH_SIZE = 10;
-const JNJ_PHOTO_CONCURRENCY = 3; // Number of batches to run in parallel.
+const JNJ_PHOTO_CONCURRENCY = 6; // Number of batches to run in parallel.
 const JNJ_REMATCH_URL = "__PORT_5000__".startsWith("__")
   ? "/api/jnj-rematch"
   : "__PORT_5000__/api/jnj-rematch";
