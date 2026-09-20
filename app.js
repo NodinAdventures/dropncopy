@@ -1418,9 +1418,9 @@ try {
       const b = Number(j.key_b_active_builds || 0);
       const lbOn = Boolean(j.load_balancer_enabled);
       if (lbOn) {
-        badge.textContent = `v25.77 · A:${a} B:${b}`;
+        badge.textContent = `v26 · A:${a} B:${b}`;
       } else {
-        badge.textContent = `v25.77 · A:${a} (single key)`;
+        badge.textContent = `v26 · A:${a} (single key)`;
       }
     } catch {}
   }
