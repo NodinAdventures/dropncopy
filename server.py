@@ -1782,6 +1782,34 @@ async def export_jnj_csv(
     )
 
 
+@app.post("/api/unjam")
+def unjam(password: str = ""):
+    # v26.6: Manual restart button. Ashley/Dave can hit this from the app
+    # when a build feels stuck ("jammed"). We reset the failure counter,
+    # log the request, and then exit(0). Render will auto-restart the
+    # Python process on exit, which takes ~5-10 seconds and clears any
+    # stuck OpenAI connections, orphaned httpx pools, or wedged asyncio
+    # tasks. Behaves exactly like Render's "Restart Service" button but
+    # doesn't require Ashley to log into the dashboard.
+    #
+    # Password-gated with the app password so a random visitor can't
+    # DoS the service by spamming this endpoint.
+    if password != "LunchTime":
+        return JSONResponse(status_code=403, content={"ok": False, "reason": "bad_password"})
+    print("[UNJAM] Manual restart requested. Failure count was:", _openai_failure_count_recent(), flush=True)
+    _openai_recent_failures.clear()
+    # Delay the exit slightly so the response can flush back to the client.
+    import threading, os as _os, sys as _sys
+    def _bye():
+        time.sleep(0.5)
+        print("[UNJAM] Exiting process now. Render will restart us.", flush=True)
+        _sys.stdout.flush()
+        _sys.stderr.flush()
+        _os._exit(0)
+    threading.Thread(target=_bye, daemon=True).start()
+    return {"ok": True, "message": "Restarting in ~1 second. Reload the page in 10-15 seconds."}
+
+
 @app.get("/api/health")
 def health():
     # v25.77: report unhealthy when we've had too many OpenAI failures in

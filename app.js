@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-09-20-v26.5-sheet-seller-header";
+const BUILD_ID = "2026-09-20-v26.6-restart-button";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v26.5 boot. BUILD_ID:", "2026-09-20-v26.5-sheet-seller-header");
+jnjLog("BOOT", "v26.6 boot. BUILD_ID:", "2026-09-20-v26.6-restart-button");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -1599,7 +1599,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v26.5 · ${BUILD_ID}`;
+  badge.textContent = `v26.6 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
@@ -1608,6 +1608,43 @@ try {
   badge.title = "Click to view debug log — shows live load-balancer state";
   badge.addEventListener("click", () => jnjShowDebugOverlay());
   document.body.appendChild(badge);
+
+  // v26.6: Manual restart button. Sits to the LEFT of the version badge.
+  // Only appears after login. When Ashley/Dave feels things are stuck,
+  // one tap restarts the Python worker in ~10 seconds. Behaves exactly
+  // like Render's dashboard restart button but doesn't require login.
+  const unjamBtn = document.createElement("button");
+  unjamBtn.id = "unjamBtn";
+  unjamBtn.type = "button";
+  unjamBtn.textContent = "↻ Restart server";
+  unjamBtn.style.cssText = "position:fixed;bottom:8px;right:250px;z-index:9998;background:#7c2d12;color:#fff;padding:6px 12px;border-radius:6px;font-size:11px;font-family:inherit;font-weight:600;border:1px solid #ea580c;box-shadow:0 2px 8px rgba(0,0,0,0.3);cursor:pointer;";
+  unjamBtn.title = "Restart the server if things feel stuck. Takes ~10 seconds.";
+  unjamBtn.addEventListener("click", async () => {
+    if (!confirm("Restart the server?\n\nUse this when a build feels stuck or nothing is happening. The server will restart in ~10 seconds and any in-progress builds will be lost.\n\nAfter it restarts, reload the page.")) return;
+    unjamBtn.disabled = true;
+    unjamBtn.textContent = "Restarting…";
+    unjamBtn.style.background = "#334155";
+    try {
+      const r = await fetch("/api/unjam?password=" + encodeURIComponent(PASSWORD), { method: "POST" });
+      const j = await r.json().catch(() => ({}));
+      if (r.ok && j.ok) {
+        toast("Server restarting. Reload the page in 10-15 seconds.");
+        // Auto-reload after 15 seconds so Ashley doesn't have to remember.
+        setTimeout(() => location.reload(), 15000);
+      } else {
+        toast("Restart failed: " + (j.reason || ("HTTP " + r.status)));
+        unjamBtn.disabled = false;
+        unjamBtn.textContent = "↻ Restart server";
+        unjamBtn.style.background = "#7c2d12";
+      }
+    } catch (err) {
+      // Fetch itself failing usually means the server already went down —
+      // that's actually what we want. Reload after a brief wait.
+      toast("Server likely restarting. Reloading in 15 seconds…");
+      setTimeout(() => location.reload(), 15000);
+    }
+  });
+  document.body.appendChild(unjamBtn);
 
   // v25.77: live load-balancer indicator. Every 5 seconds we ask the server
   // how many builds each OpenAI key is currently handling, and show it in
@@ -1627,9 +1664,9 @@ try {
       const b = Number(j.key_b_active_builds || 0);
       const lbOn = Boolean(j.load_balancer_enabled);
       if (lbOn) {
-        badge.textContent = `v26.5 · A:${a} B:${b}`;
+        badge.textContent = `v26.6 · A:${a} B:${b}`;
       } else {
-        badge.textContent = `v26.5 · A:${a} (single key)`;
+        badge.textContent = `v26.6 · A:${a} (single key)`;
       }
     } catch {}
   }
