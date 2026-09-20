@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-09-20-v26.1-zip-support";
+const BUILD_ID = "2026-09-20-v26.2-review-columns";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v26.1 boot. BUILD_ID:", "2026-09-20-v26.1-zip-support");
+jnjLog("BOOT", "v26.2 boot. BUILD_ID:", "2026-09-20-v26.2-review-columns");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -142,16 +142,20 @@ window.addEventListener("resize", jnjCheckScreenSize);
      - reject(new Error())  when user clicks "Cancel"
 
    Items in the returned array have the same shape as items going in
-   (item_num, lot_number, description, sheet_seller_num, sheet_index,
-    _row_key), so downstream photo-match / CSV code doesn't need to change. */
+   (item_num, lot_code, description, sheet_seller_num, sheet_index,
+    _row_key), so downstream photo-match / CSV code doesn't need to change.
+   NOTE: item_num is the LOT NUMBER (e.g. "5435") that Dave prints on his
+   tags. lot_code is the LOCATION marker (e.g. "116C") from the right
+   column of the sheet. Do NOT swap these — downstream logic depends on
+   the distinction. */
 function openTextReviewModal(itemsIn) {
   return new Promise((resolve, reject) => {
     // Deep-copy the items so cancel truly restores originals. We only
     // mutate `working` inside the modal.
     const working = itemsIn.map(it => ({
       _row_key: it._row_key,
-      item_num: String(it.item_num || ""),
-      lot_number: String(it.lot_number || it.LotNumber || ""),
+      item_num: String(it.item_num || ""),         // LOT # — e.g. "5435"
+      lot_code: String(it.lot_code || ""),          // LOCATION — e.g. "116C"
       description: String(it.description || it.Description || ""),
       sheet_seller_num: it.sheet_seller_num || "",
       sheet_index: it.sheet_index,
@@ -194,9 +198,10 @@ function openTextReviewModal(itemsIn) {
           <table class="jnj-review-table">
             <thead>
               <tr>
-                <th style="width:56px;">#</th>
-                <th style="width:110px;">Item #</th>
-                <th style="width:88px;">Lot</th>
+                <th style="width:44px;">#</th>
+                <th style="width:96px;">Lot #</th>
+                <th style="width:80px;">Location</th>
+                <th style="width:96px;">Seller</th>
                 <th>Description</th>
                 <th style="width:130px;">Tools</th>
               </tr>
@@ -233,12 +238,20 @@ function openTextReviewModal(itemsIn) {
         tr.appendChild(numTd);
 
         const itemTd = document.createElement("td");
-        itemTd.innerHTML = `<input type="text" class="jnj-review-input item" value="${_escAttr(row.item_num)}" spellcheck="false" />`;
+        itemTd.innerHTML = `<input type="text" class="jnj-review-input item" value="${_escAttr(row.item_num)}" spellcheck="false" placeholder="Lot #" />`;
         tr.appendChild(itemTd);
 
         const lotTd = document.createElement("td");
-        lotTd.innerHTML = `<input type="text" class="jnj-review-input lot" value="${_escAttr(row.lot_number)}" spellcheck="false" placeholder="—" />`;
+        lotTd.innerHTML = `<input type="text" class="jnj-review-input lot" value="${_escAttr(row.lot_code)}" spellcheck="false" placeholder="—" />`;
         tr.appendChild(lotTd);
+
+        // Seller cell — the boxed number at top of sheet. Editable in case
+        // AI missed it. Auto-fills from the sheet group so Ashley rarely has
+        // to touch it, but if a whole sheet is blank she can type it in one
+        // row and use "Copy seller ↓" to fill the rest of the sheet.
+        const sellerTd = document.createElement("td");
+        sellerTd.innerHTML = `<input type="text" class="jnj-review-input seller" value="${_escAttr(row.sheet_seller_num)}" spellcheck="false" placeholder="Seller" title="Boxed seller # from top of sheet" />`;
+        tr.appendChild(sellerTd);
 
         // Description — textarea so long descriptions grow, spellcheck=true.
         const descTd = document.createElement("td");
@@ -264,8 +277,10 @@ function openTextReviewModal(itemsIn) {
           ta.style.height = "auto";
           ta.style.height = (ta.scrollHeight + 2) + "px";
         };
+        const sellerInput = sellerTd.querySelector("input");
         itemInput.addEventListener("input", () => { row.item_num = itemInput.value; });
-        lotInput.addEventListener("input", () => { row.lot_number = lotInput.value; });
+        lotInput.addEventListener("input", () => { row.lot_code = lotInput.value; });
+        sellerInput.addEventListener("input", () => { row.sheet_seller_num = sellerInput.value; });
         descInput.addEventListener("input", () => {
           row.description = descInput.value;
           autosize(descInput);
@@ -294,7 +309,7 @@ function openTextReviewModal(itemsIn) {
             const newRow = {
               _row_key: `rowNew${newRowCounter}`,
               item_num: "",
-              lot_number: row.lot_number || "",   // inherit lot — usually the split's on the same shelf
+              lot_code: row.lot_code || "",   // inherit location — usually same shelf
               description: "",
               sheet_seller_num: row.sheet_seller_num,
               sheet_index: row.sheet_index,
@@ -339,7 +354,7 @@ function openTextReviewModal(itemsIn) {
         // is junk and would break the CSV downstream).
         const kept = working.filter(r =>
           (r.item_num || "").trim() ||
-          (r.lot_number || "").trim() ||
+          (r.lot_code || "").trim() ||
           (r.description || "").trim()
         );
         if (!kept.length) {
@@ -349,12 +364,12 @@ function openTextReviewModal(itemsIn) {
         // Rebuild items in the exact shape downstream expects.
         const out = kept.map(r => {
           const base = r._original ? { ...r._original } : {};
-          base.item_num = (r.item_num || "").trim();
-          base.lot_number = (r.lot_number || "").trim();
-          base.LotNumber = base.lot_number;   // some downstream code reads this alias
+          base.item_num = (r.item_num || "").trim().toUpperCase().replace(/\s+/g, "");
+          base.lot_code = (r.lot_code || "").trim().toUpperCase().replace(/\s+/g, "");
           base.description = (r.description || "").trim();
-          base.Description = base.description; // alias
-          base.sheet_seller_num = r.sheet_seller_num || "";
+          base.Description = base.description; // alias for any legacy readers
+          // Sanitize seller to digits/letters only (AA prefix is added downstream).
+          base.sheet_seller_num = (r.sheet_seller_num || "").toString().trim().toUpperCase().replace(/\s+/g, "");
           base.sheet_index = r.sheet_index;
           base._row_key = r._row_key;
           return base;
@@ -1537,7 +1552,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v26.1 · ${BUILD_ID}`;
+  badge.textContent = `v26.2 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
@@ -1565,9 +1580,9 @@ try {
       const b = Number(j.key_b_active_builds || 0);
       const lbOn = Boolean(j.load_balancer_enabled);
       if (lbOn) {
-        badge.textContent = `v26.1 · A:${a} B:${b}`;
+        badge.textContent = `v26.2 · A:${a} B:${b}`;
       } else {
-        badge.textContent = `v26.1 · A:${a} (single key)`;
+        badge.textContent = `v26.2 · A:${a} (single key)`;
       }
     } catch {}
   }
