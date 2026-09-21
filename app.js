@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-09-20-v26.10.1-photo-sort";
+const BUILD_ID = "2026-09-20-v26.10.3-tap-multi-select";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v26.10.1 boot. BUILD_ID:", "2026-09-20-v26.10.1-photo-sort");
+jnjLog("BOOT", "v26.10.3 boot. BUILD_ID:", "2026-09-20-v26.10.3-tap-multi-select");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -1608,7 +1608,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v26.10.1 · ${BUILD_ID}`;
+  badge.textContent = `v26.10.3 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
@@ -1673,9 +1673,9 @@ try {
       const b = Number(j.key_b_active_builds || 0);
       const lbOn = Boolean(j.load_balancer_enabled);
       if (lbOn) {
-        badge.textContent = `v26.10.1 · A:${a} B:${b}`;
+        badge.textContent = `v26.10.3 · A:${a} B:${b}`;
       } else {
-        badge.textContent = `v26.10.1 · A:${a} (single key)`;
+        badge.textContent = `v26.10.3 · A:${a} (single key)`;
       }
     } catch {}
   }
@@ -2928,8 +2928,13 @@ document.addEventListener("click", (e) => {
   if (thumb) {
     const fname = thumb.dataset.filename;
 
+    // v26.10.3: NO KEYS NEEDED. Ashley's rule — tap-to-toggle.
+    // Each plain click toggles a photo in/out of the selection set.
+    // Tap the first photo, tap the second, tap the third — all three
+    // stay selected. Drag any one of them to move the whole group.
+    // Tap a selected photo again to remove it from the group.
+    // Shift+click still works as a range shortcut (Finder-style).
     if (isShift && jnjLastClickedPhoto) {
-      // Shift+click: select every photo in DOM order between anchor and this one
       const allThumbs = Array.from(document.querySelectorAll(".jnj-photo-thumb"));
       const names = allThumbs.map(t => t.dataset.filename);
       const a = names.indexOf(jnjLastClickedPhoto);
@@ -2940,33 +2945,19 @@ document.addEventListener("click", (e) => {
       } else {
         jnjSelectedPhotos.add(fname);
       }
-      jnjSelectedPhoto = fname;
-      toast(`${jnjSelectedPhotos.size} photos selected. Drag one to move them all.`);
-    } else if (isMeta) {
-      // Cmd/Ctrl+click: toggle this photo in the selection set
+    } else {
+      // Plain click OR Cmd/Ctrl+click — both behave the same:
+      // toggle this photo in the selection.
       if (jnjSelectedPhotos.has(fname)) {
         jnjSelectedPhotos.delete(fname);
       } else {
         jnjSelectedPhotos.add(fname);
       }
-      jnjLastClickedPhoto = fname;
-      jnjSelectedPhoto = jnjSelectedPhotos.size === 1 ? Array.from(jnjSelectedPhotos)[0] : null;
-      if (jnjSelectedPhotos.size > 1) {
-        toast(`${jnjSelectedPhotos.size} photos selected. Drag one to move them all.`);
-      }
-    } else {
-      // Plain click: single-select (or deselect if it was the only one)
-      if (jnjSelectedPhotos.size === 1 && jnjSelectedPhotos.has(fname)) {
-        jnjSelectedPhotos.clear();
-        jnjSelectedPhoto = null;
-        jnjLastClickedPhoto = null;
-      } else {
-        jnjSelectedPhotos.clear();
-        jnjSelectedPhotos.add(fname);
-        jnjSelectedPhoto = fname;
-        jnjLastClickedPhoto = fname;
-        toast(`Selected photo. Cmd+click to add more, then tap an item card to assign.`);
-      }
+    }
+    jnjLastClickedPhoto = fname;
+    jnjSelectedPhoto = jnjSelectedPhotos.size === 1 ? Array.from(jnjSelectedPhotos)[0] : null;
+    if (jnjSelectedPhotos.size > 0) {
+      toast(`${jnjSelectedPhotos.size} photo${jnjSelectedPhotos.size === 1 ? "" : "s"} selected. Drag any one to move them, or tap an item card to assign.`);
     }
     jnjRenderPreview();
   } else if (itemCard && jnjSelectedPhotos.size > 0) {
@@ -2991,13 +2982,11 @@ document.addEventListener("click", (e) => {
     jnjSelectedPhoto = null;
     jnjLastClickedPhoto = null;
     jnjRenderPreview();
-  } else if (!thumb && !itemCard && jnjSelectedPhotos.size > 0) {
-    // Click empty area -> clear selection
-    jnjSelectedPhotos.clear();
-    jnjSelectedPhoto = null;
-    jnjLastClickedPhoto = null;
-    jnjRenderPreview();
   }
+  // v26.10.3: NO auto-clear on empty-area clicks. Ashley's flow taps
+  // photos then reads the sheet then taps more photos — clicking blank
+  // space between them shouldn't nuke the selection. To clear, tap the
+  // selected photos again OR complete an assignment (which auto-clears).
 });
 
 // v25.73: `target` is now a _row_key (unique) rather than item_num.
