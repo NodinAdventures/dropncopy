@@ -8,6 +8,10 @@
 <link href="https://api.fontshare.com/v2/css?f[]=general-sans@500,600,400&f[]=jetbrains-mono@400&display=swap" rel="stylesheet" />
 <link rel="stylesheet" href="style.css" />
 <!-- Text extraction happens on the backend via a vision model that reads handwriting. -->
+<!-- v26.11: jsQR runs in the browser to detect divider QR codes locally BEFORE
+     uploading to the server. Photos with no QR skip the server entirely.
+     Loaded from CDN; falls back to server-only mode if the CDN is blocked. -->
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
 </head>
 <body>
 

@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-09-20-v26.10.3-tap-multi-select";
+const BUILD_ID = "2026-09-20-v26.11-browser-qr-prescan";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v26.10.3 boot. BUILD_ID:", "2026-09-20-v26.10.3-tap-multi-select");
+jnjLog("BOOT", "v26.11 boot. BUILD_ID:", "2026-09-20-v26.11-browser-qr-prescan");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -1608,7 +1608,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v26.10.3 · ${BUILD_ID}`;
+  badge.textContent = `v26.11 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
@@ -1673,9 +1673,9 @@ try {
       const b = Number(j.key_b_active_builds || 0);
       const lbOn = Boolean(j.load_balancer_enabled);
       if (lbOn) {
-        badge.textContent = `v26.10.3 · A:${a} B:${b}`;
+        badge.textContent = `v26.11 · A:${a} B:${b}`;
       } else {
-        badge.textContent = `v26.10.3 · A:${a} (single key)`;
+        badge.textContent = `v26.11 · A:${a} (single key)`;
       }
     } catch {}
   }
@@ -1691,6 +1691,81 @@ const JNJ_HEALTH_URL = "__PORT_5000__".startsWith("__")
 // Wake up the Render Free-tier server before hitting a real endpoint. The
 // server spins down after ~15 min of inactivity and takes up to 50s to come
 // back — without this, the first Build after a long idle will 502.
+// v26.11: browser-side QR pre-scan. Runs in parallel with sheet reading
+// and text review. For each photo, downscales to 900px, runs jsQR once
+// straight and once rotated 180°, and records whether the DROPNCOPY-DIVIDER
+// QR is present. Photos with no QR skip the server entirely at match time.
+//
+// jsQR is loaded from CDN in index.html; if it failed (offline / CDN block),
+// this function no-ops and everything falls back to server-side scanning.
+//
+// Concurrency is limited to 4 to avoid pegging CPU and blocking the UI.
+// Even at 4-wide, ~50ms per photo means 378 photos = ~4-5 seconds total.
+async function jnjRunLocalQrPrescan(photoFiles) {
+  if (typeof window.jsQR !== "function") {
+    jnjLog("QR-PRESCAN-SKIP", "jsQR not loaded (offline?) — falling back to server-only QR");
+    return;
+  }
+  jnjLog("QR-PRESCAN-START", `photos=${photoFiles.length}`);
+
+  const PRESCAN_MAX_DIM = 900;   // downscale for speed; QR is still readable at ~30px
+  const PRESCAN_CONCURRENCY = 4;
+
+  // Scan one photo file: returns {has_qr, thumb_data_url}. Never throws.
+  const scanOne = async (f) => {
+    try {
+      const bitmap = await createImageBitmap(f).catch(() => null);
+      if (!bitmap) return { has_qr: false, thumb_data_url: "" };
+      const scale = Math.min(1, PRESCAN_MAX_DIM / Math.max(bitmap.width, bitmap.height));
+      const w = Math.round(bitmap.width * scale);
+      const h = Math.round(bitmap.height * scale);
+      const canvas = document.createElement("canvas");
+      canvas.width = w; canvas.height = h;
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      ctx.drawImage(bitmap, 0, 0, w, h);
+      bitmap.close && bitmap.close();
+      const imageData = ctx.getImageData(0, 0, w, h);
+      // Try upright.
+      let code = window.jsQR(imageData.data, w, h, { inversionAttempts: "attemptBoth" });
+      // Try 180° rotation (phones often shoot cards upside down).
+      if (!code || !/DROPNCOPY-DIVIDER/i.test(code.data || "")) {
+        // Rotate 180 = flip both axes = reverse pixel array in 4-byte chunks.
+        const src = imageData.data;
+        const dst = new Uint8ClampedArray(src.length);
+        for (let i = 0; i < src.length; i += 4) {
+          const j = src.length - 4 - i;
+          dst[j] = src[i]; dst[j+1] = src[i+1]; dst[j+2] = src[i+2]; dst[j+3] = src[i+3];
+        }
+        code = window.jsQR(dst, w, h, { inversionAttempts: "attemptBoth" });
+      }
+      const hit = !!(code && /DROPNCOPY-DIVIDER/i.test(code.data || ""));
+      return { has_qr: hit, thumb_data_url: "" };
+    } catch (e) {
+      return { has_qr: false, thumb_data_url: "" };
+    }
+  };
+
+  // Concurrent worker pool.
+  let nextIdx = 0;
+  const worker = async () => {
+    while (true) {
+      const idx = nextIdx++;
+      if (idx >= photoFiles.length) return;
+      const f = photoFiles[idx];
+      const result = await scanOne(f);
+      window.jnjQrPrescan.set(f.name, result);
+    }
+  };
+  const workers = [];
+  for (let w = 0; w < Math.min(PRESCAN_CONCURRENCY, photoFiles.length); w++) {
+    workers.push(worker());
+  }
+  await Promise.all(workers);
+
+  const hits = Array.from(window.jnjQrPrescan.values()).filter(v => v.has_qr).length;
+  jnjLog("QR-PRESCAN-FINISHED", `photos=${photoFiles.length}`, `local_qr_hits=${hits}`);
+}
+
 async function jnjWarmupServer(statusEl) {
   const started = Date.now();
   let lastErr = null;
@@ -1801,6 +1876,15 @@ async function jnjHandleFiles(input) {
     jnjShowErrorBanner("Need at least 1 sheet and 1 item photo to build.");
     return;
   }
+
+  // v26.11: BACKGROUND PRE-SCAN. Kick off browser-side QR detection on
+  // every photo NOW, in parallel with sheet-reading and text-review.
+  // Results land in jnjQrPrescan. When photo matching starts, we skip
+  // server calls for confirmed non-dividers.
+  window.jnjQrPrescan = new Map();  // filename -> {has_qr: bool, thumb_data_url: str}
+  window.jnjQrPrescanPromise = jnjRunLocalQrPrescan(photos).catch(err => {
+    jnjLog("QR-PRESCAN-ERR", err && err.message);
+  });
 
   jnjRestorePrefs();
 
@@ -2013,6 +2097,19 @@ async function jnjHandleFiles(input) {
     if (!items.length) {
       throw new Error("No items left after review — nothing to build.");
     }
+    // v26.11: WAIT for background pre-scan to finish before matching.
+    // If it finished during review (usually), this returns instantly.
+    // If review was fast, we might wait a few seconds here — still
+    // faster than uploading everything serially.
+    if (window.jnjQrPrescanPromise) {
+      const preScanStart = Date.now();
+      statusEl.textContent = `waiting for local QR pre-scan…`;
+      await window.jnjQrPrescanPromise;
+      const waited = Math.round((Date.now() - preScanStart) / 1000);
+      const hits = Array.from(window.jnjQrPrescan.values()).filter(v => v.has_qr).length;
+      jnjLog("QR-PRESCAN-DONE", `photos=${photos.length}`, `local_qr_hits=${hits}`, `waited=${waited}s`);
+    }
+
     statusEl.textContent = `review complete — ${items.length} items. Matching ${photos.length} photos…`;
 
     // v26.10.1: THE fix that was missing all along. Sort photos by
@@ -2027,13 +2124,77 @@ async function jnjHandleFiles(input) {
     // shot order that the cursor-walk depends on.
     photos.sort((a, b) => (a.name || "").localeCompare(b.name || "", undefined, { numeric: true, sensitivity: "base" }));
 
-    // ---------- Step 2: process photos in batches, in parallel ----------
+    // v26.11: SKIP-THE-SERVER FAST PATH.
+    // For every photo where our local jsQR pre-scan already confirmed NO
+    // divider QR, we don't need the server to look at it — we know it's
+    // an item photo. We synthesize a response client-side matching the
+    // server's schema. Only photos with a local QR hit OR photos the
+    // pre-scan didn't cover (jsQR failed to load, decode errored, etc.)
+    // get uploaded. On a typical 378-photo sale with ~50 QR dividers,
+    // that's ~50 uploads instead of 378 — ~7-8× fewer server calls.
+    const localPrescan = window.jnjQrPrescan || new Map();
+    const photosToUpload = [];
+    const photosLocallySkipped = [];
+    for (const p of photos) {
+      const pre = localPrescan.get(p.name);
+      if (pre && pre.has_qr === false) {
+        // Confirmed non-divider by local scan — skip server call entirely.
+        photosLocallySkipped.push(p);
+      } else {
+        // Local scan hit a QR, or has no data for this photo. Upload it
+        // so the server can confirm (and generate the item thumbnail).
+        photosToUpload.push(p);
+      }
+    }
+    jnjLog("QR-FAST-PATH", `total=${photos.length}`, `upload=${photosToUpload.length}`, `skipped_locally=${photosLocallySkipped.length}`);
+    statusEl.textContent = `matching photos… ${photosLocallySkipped.length} already scanned locally, ${photosToUpload.length} to upload`;
+
+    // Build a synthetic server-style response for the skipped photos so
+    // downstream code (cursor-walk, itemPhotos, unmatched) sees them.
+    // Thumbnails: we generate a small data URL from the file so the UI
+    // has something to render — same as what the server would have made.
+    const synthesizeLocalResponses = async () => {
+      const results = [];
+      for (const f of photosLocallySkipped) {
+        let thumb_data_url = "";
+        try {
+          const bmp = await createImageBitmap(f).catch(() => null);
+          if (bmp) {
+            const scale = Math.min(1, 400 / Math.max(bmp.width, bmp.height));
+            const w = Math.round(bmp.width * scale);
+            const h = Math.round(bmp.height * scale);
+            const c = document.createElement("canvas");
+            c.width = w; c.height = h;
+            c.getContext("2d").drawImage(bmp, 0, 0, w, h);
+            bmp.close && bmp.close();
+            thumb_data_url = c.toDataURL("image/jpeg", 0.75);
+          }
+        } catch {}
+        results.push({
+          filename: f.name,
+          thumb_data_url,
+          tag_read: "",
+          description_read: "",
+          dhash: "",
+          is_blank: false,
+          first_pass: "yes",
+          item_num_match: "",
+          match_kind: "none",
+          divider_score: 0,
+          has_divider_qr: false,
+          ai_thumb_b64: "",
+        });
+      }
+      return results;
+    };
+
+    // ---------- Step 2: process the remaining photos in batches, in parallel ----------
     // Batch size 8 with concurrency 3 means we're running 24 photos through
     // OpenAI simultaneously, which is well under any rate limit and dramatically
     // faster than the old sequential 3-at-a-time approach.
     const batches = [];
-    for (let i = 0; i < photos.length; i += JNJ_PHOTO_BATCH_SIZE) {
-      batches.push(photos.slice(i, i + JNJ_PHOTO_BATCH_SIZE));
+    for (let i = 0; i < photosToUpload.length; i += JNJ_PHOTO_BATCH_SIZE) {
+      batches.push(photosToUpload.slice(i, i + JNJ_PHOTO_BATCH_SIZE));
     }
     const itemsJson = JSON.stringify(items);
     const results = new Array(batches.length); // Store by index to preserve order.
@@ -2088,14 +2249,26 @@ async function jnjHandleFiles(input) {
     }
     await Promise.all(workers);
 
-    // Flatten results in the original batch order and re-index photo ids.
-    const allPhotoInfos = [];
+    // v26.11: build a lookup of ALL responses (server + local synthetic),
+    // then reorder by the sorted `photos` array so the cursor-walk still
+    // processes them in true shot order.
+    const responseByFilename = new Map();
     for (const batchResults of results) {
       if (!batchResults) continue;
-      for (const p of batchResults) {
-        p.id = `p${allPhotoInfos.length}`;
-        allPhotoInfos.push(p);
+      for (const p of batchResults) responseByFilename.set(p.filename, p);
+    }
+    const syntheticResponses = await synthesizeLocalResponses();
+    for (const p of syntheticResponses) responseByFilename.set(p.filename, p);
+
+    const allPhotoInfos = [];
+    for (const f of photos) {
+      const p = responseByFilename.get(f.name);
+      if (!p) {
+        jnjLog("QR-FAST-PATH-MISS", `No response for ${f.name} — skipping`);
+        continue;
       }
+      p.id = `p${allPhotoInfos.length}`;
+      allPhotoInfos.push(p);
     }
 
     statusEl.textContent = `done — ${items.length} items, ${allPhotoInfos.length} photos`;
@@ -2863,7 +3036,9 @@ function jnjRenderPreview() {
 function jnjPhotoThumbHtml(fname, isUnmatched = false) {
   const info = jnjState.photos.get(fname);
   if (!info) return "";
-  const selected = jnjSelectedPhoto === fname ? " selected" : "";
+  // v26.10.4: check the multi-select SET, not just the legacy single var.
+  // This is why the blue outline wasn't appearing when tapping photos.
+  const selected = (jnjSelectedPhotos && jnjSelectedPhotos.has(fname)) || jnjSelectedPhoto === fname ? " selected" : "";
   const cls = (isUnmatched ? "jnj-photo-thumb unmatched" : "jnj-photo-thumb") + selected;
   const tagBadge = info.tag_read ? ` title="Tag: ${escapeAttr(info.tag_read)}"` : (info.description_read ? ` title="${escapeAttr(info.description_read)}"` : "");
   // v26: figure out if THIS is the first (main) photo in its lot so we can
