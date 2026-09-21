@@ -482,6 +482,16 @@ async def debug_env():
 
 SYSTEM_PROMPT = """You are an OCR transcription assistant for handwritten charity-auction / consignment intake sheets. The output goes into a single DESCRIPTION field on the JnJ Online Auction listing form.
 
+=== READ CAREFULLY — THIS IS NOT A SPEED TEST ===
+Before you type any row, look at that row on the sheet TWICE. Pay attention to which column each character sits in. The columns on the sheet are:
+  1. Item number (far left)
+  2. Lot / location code (short, 1-4 characters)
+  3. Description (the long text describing the item)
+
+Never guess. If a character straddles a column line, look at which column its left edge starts in — that is its true column. Do NOT let text from one column bleed into the next.
+
+Real people are using these listings to sell real items. A wrong lot code sends the item to the wrong shelf. A wrong quantity sells the wrong number of things. Slow down and get each row right.
+
 OUTPUT FORMAT: ONE ITEM PER LINE. Each line is one full auction listing description. NO tabs. NO columns. NO title field.
 
 === WHAT EACH LINE LOOKS LIKE ===
@@ -541,11 +551,29 @@ If you see two chunks between the item number and the description (like "Z 3" or
 The lot number is always in the second column of the sheet, right after the item number column, and BEFORE the description column. Read them from the columns exactly as laid out.
 
 **WHAT A VALID LOT CODE LOOKS LIKE (STRICT):**
-A lot code is SHORT and follows one of these patterns:
-  - 1-2 digits + 1 uppercase letter: 18A, 17B, 21C, 33C, 37G, 35B, 91B, 9B, 15C
-  - A single uppercase letter: F, Z, P, C, Cr ("Cr" is 2 letters, still valid)
+A lot code is SHORT (1-4 characters MAX) and follows one of these patterns:
+  - A single uppercase letter or digit: O, Z, F, P, C, 0, 5
+  - 1-2 digits + 1 uppercase letter: 18A, 17B, 21C, 33C, 37G, 35B, 91B, 9B, 15C, 69E
   - A letter + short digit merged: Z3, P16
   - Plain 3-4 digit numbers with an optional trailing letter: 2046, 204B
+
+HARD CAP: A lot code is NEVER longer than 4 characters. If what you're about to write in the lot column is 5 or more characters (like "026", "011", or "5PCS"), STOP — you are grabbing digits from the description column by mistake.
+
+**THE DESCRIPTION CAN START WITH A NUMBER — THAT NUMBER IS NOT A LOT CODE:**
+Many descriptions start with a quantity like "26 pcs 2x8s...", "5 pc plywood", "11 pcs fascia", "3 unused faucet covers", "2 MATTRESSES". Those leading numbers ARE PART OF THE DESCRIPTION, not the lot code.
+
+If the office-use / lot column contains a single character like "O" or "0" or "Z", and the DESCRIPTION column next to it starts with digits, DO NOT glue those digits onto the lot code. The lot code stays as the single character. The digits belong to the description.
+
+WRONG (do not do this):
+  Sheet row: "2460  O  26 pcs 2x8s assorted..."
+  Wrong output: item_num=2460, lot_code="026", desc="pcs 2x8s assorted"
+     ^^^^ NO. Lot code is O. Description starts with "26 pcs".
+
+RIGHT:
+  Sheet row: "2460  O  26 pcs 2x8s assorted..."
+  Right output: item_num=2460, lot_code="O", desc="26 PCS 2X8S ASSORTED..."
+
+If the lot code you're reading is followed by a word like "pcs", "pc", "inch", "in", "ft", "lot", "box", "set", "pair", "pack" — those are description words. Stop reading at the character before the number that starts the description.
 
 A lot code is NEVER an English word. "COBRA", "BRASS", "BOOK", "YARD", "LARGE", "SLEDS", "DIGITAL", "HOODED", "OFFICIAL" are NOT lot codes — they are the first word of the DESCRIPTION.
 
@@ -1154,7 +1182,100 @@ async def transcribe_image(image_bytes: bytes, media_type: str) -> str:
     # the reconcile logic sees a clean sequential run.
     fixed = _fix_first_row_duplicate(sanitized)
     reconciled = _reconcile_item_numbers(fixed, verified_nums)
-    return reconciled
+    # v26.17.4: fact-checker pass. AI compares its transcription against the
+    # sheet image and auto-fixes obvious mismatches. Ashley OK'd silent
+    # auto-fix because she edits at the end anyway; a wrong auto-fix here
+    # is no worse than a wrong first pass.
+    try:
+        double_checked = await _fact_check_transcript(image_bytes, media_type, reconciled)
+        return double_checked
+    except Exception as e:
+        # If the fact-checker fails for any reason, fall back to the
+        # reconciled first-pass output. Never break the pipeline over it.
+        print(f"[fact-check] fell back to first pass: {e}", flush=True)
+        return reconciled
+
+
+async def _fact_check_transcript(image_bytes: bytes, media_type: str, transcript: str) -> str:
+    """v26.17.4: second-pass sanity check.
+
+    Sends the sheet image PLUS the first-pass transcript back to the model
+    and asks it to compare row-by-row, fixing any mismatched item numbers,
+    lot codes, or descriptions. Output is a full replacement transcript in
+    the same format the downstream parser expects.
+
+    Text only — no photos. Auto-fixes silently per Ashley's preference.
+    """
+    if not (transcript or "").strip():
+        return transcript
+    b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
+    data_url = f"data:{media_type};base64,{b64}"
+    check_prompt = (
+        "You just transcribed this intake sheet. Below is what you wrote. "
+        "Compare it to the sheet image ROW BY ROW and fix ANY mistakes:\n"
+        "  1. Wrong item numbers (compare far-left column)\n"
+        "  2. Wrong lot / location codes (short 1-4 char code in column 2; "
+        "a lot code is NEVER 5+ chars — those extra digits belong to the description)\n"
+        "  3. Missing or wrong words in descriptions\n"
+        "  4. Rows that got merged when they should be separate, or split when "
+        "they should be one row\n\n"
+        "Rules for your corrected output:\n"
+        "  - EXACT same format as the input: one row per line, ITEM_NUMBER "
+        "LOT_CODE DESCRIPTION separated by single spaces\n"
+        "  - ALL CAPS for descriptions\n"
+        "  - If a row's lot column is blank, omit the lot code entirely — do "
+        "NOT grab the first word of the description\n"
+        "  - If a row's description starts with a number+unit like '26 pcs', "
+        "'5 pc', '11 pcs', '3 ft', that number belongs to the DESCRIPTION, "
+        "not the lot code\n"
+        "  - Do NOT change anything you can't clearly verify against the sheet. "
+        "When in doubt, leave the row as-is.\n"
+        "  - Output ONLY the corrected transcript. No commentary. No explanations. "
+        "No markdown fences.\n\n"
+        "First-pass transcript to check:\n\n"
+        f"{transcript}"
+    )
+    resp = await _openai_with_retry(
+        lambda: _current_client.get().chat.completions.create(
+            model="gpt-4o",
+            max_tokens=4000,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": data_url, "detail": "high"},
+                        },
+                        {
+                            "type": "text",
+                            "text": check_prompt,
+                        },
+                    ],
+                },
+            ],
+        ),
+        op_name="fact_check_transcript",
+    )
+    checked = (resp.choices[0].message.content or "").strip()
+    if not checked:
+        return transcript
+    # Strip any markdown fences the model might slip in despite instructions.
+    if checked.startswith("```"):
+        lines = checked.split("\n")
+        # Drop the fence lines
+        lines = [l for l in lines if not l.strip().startswith("```")]
+        checked = "\n".join(lines).strip()
+    # Sanitize + safety: reject if the checked output has WAY fewer rows than
+    # the input (fact-checker should never delete most of the sheet).
+    orig_lines = [l for l in transcript.splitlines() if l.strip()]
+    checked_lines = [l for l in checked.splitlines() if l.strip()]
+    if len(checked_lines) < max(1, len(orig_lines) - 2) and len(orig_lines) >= 3:
+        print(f"[fact-check] rejected — dropped too many rows ({len(orig_lines)} → {len(checked_lines)})", flush=True)
+        return transcript
+    print(f"[fact-check] {len(orig_lines)} rows in → {len(checked_lines)} rows out", flush=True)
+    return sanitize_transcript(checked)
 
 
 
@@ -2881,7 +3002,7 @@ async def jnj_diag():
         "recent_openai_failures": _openai_failure_count_recent(),
         "failure_threshold": _OPENAI_FAILURE_THRESHOLD,
         "python_version": _sys.version.split()[0],
-        "build_id": "2026-09-21-v26.17.2-no-yellow-warn",
+        "build_id": "2026-09-21-v26.17.4-factcheck-plus-locationrule",
     })
 
 

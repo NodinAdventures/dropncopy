@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-09-21-v26.17.2-no-yellow-warn";
+const BUILD_ID = "2026-09-21-v26.17.4-factcheck-plus-locationrule";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v26.17.2 boot. BUILD_ID:", "2026-09-21-v26.17.2-no-yellow-warn");
+jnjLog("BOOT", "v26.17.4 boot. BUILD_ID:", "2026-09-21-v26.17.4-factcheck-plus-locationrule");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -342,13 +342,17 @@ function openTextReviewModal(itemsIn) {
           } else if (action === "split") {
             // Insert a blank row directly below this one. Cursor jumps to
             // the new row's description field.
+            // v26.17.4: new row starts COMPLETELY BLANK — no inheritance.
+            // Ashley wants row edits to stand alone. Sheet-index is the only
+            // structural field we carry over (so the new row belongs to the
+            // same sheet visually and for CSV grouping).
             newRowCounter += 1;
             const newRow = {
               _row_key: `rowNew${newRowCounter}`,
               item_num: "",
-              lot_code: row.lot_code || "",   // inherit location — usually same shelf
+              lot_code: "",
               description: "",
-              sheet_seller_num: row.sheet_seller_num,
+              sheet_seller_num: "",
               sheet_index: row.sheet_index,
               _original: null,   // brand-new, no original
             };
@@ -1608,7 +1612,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v26.17.2 · ${BUILD_ID}`;
+  badge.textContent = `v26.17.4 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
@@ -1673,9 +1677,9 @@ try {
       const b = Number(j.key_b_active_builds || 0);
       const lbOn = Boolean(j.load_balancer_enabled);
       if (lbOn) {
-        badge.textContent = `v26.17.2 · A:${a} B:${b}`;
+        badge.textContent = `v26.17.4 · A:${a} B:${b}`;
       } else {
-        badge.textContent = `v26.17.2 · A:${a} (single key)`;
+        badge.textContent = `v26.17.4 · A:${a} (single key)`;
       }
     } catch {}
   }
@@ -2714,10 +2718,12 @@ function jnjRenderPreview() {
     jnjLog("SANITY-CHECK-ERR", err);
   }
 
-  // v26.17.2: Yellow OCR-misread warning banner removed. Ashley found it
-  // confusing — it flagged legitimate lot jumps between sellers on typed
-  // sheets as suspicious. The per-row yellow highlight still fires so you
-  // CAN see individual flagged rows, but no top-level banner nagging.
+  // Show a warning banner at the top if anything is flagged.
+  let flaggedCount = 0;
+  _flags.forEach(f => { if (f.lot || f.seller) flaggedCount++; });
+  if (flaggedCount > 0) {
+    jnjPreviewSub.textContent += `  ⚠️ ${flaggedCount} row${flaggedCount === 1 ? "" : "s"} may have an OCR misread — look for the yellow highlight.`;
+  }
 
   // Items list
   jnjItemsList.innerHTML = "";
@@ -2755,8 +2761,10 @@ function jnjRenderPreview() {
     card.dataset.itemNum = it.item_num;
     // v25.73: unique row key for photo bucket lookup (handles duplicate item_nums).
     card.dataset.rowKey = it._row_key || "";
-    // v26.17.2: OCR-misread yellow highlight disabled. Kept flag map for
-    // future diagnostics but no CSS class is applied — rows render normally.
+    // v25.58: attach flag classes so CSS can highlight suspicious rows.
+    const flg = _flags.get(it.item_num) || { lot: false, seller: false };
+    if (flg.lot) card.classList.add("jnj-flag-lot");
+    if (flg.seller) card.classList.add("jnj-flag-seller");
 
     // v25.8: lot codes and item numbers are INLINE-EDITABLE. Tap the pill
     // to correct any OCR misread (e.g. "116C" → "4B"). Fixes ride along
