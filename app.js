@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-09-20-v26.11-browser-qr-prescan";
+const BUILD_ID = "2026-09-20-v26.12-compress-before-upload";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v26.11 boot. BUILD_ID:", "2026-09-20-v26.11-browser-qr-prescan");
+jnjLog("BOOT", "v26.12 boot. BUILD_ID:", "2026-09-20-v26.12-compress-before-upload");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -1608,7 +1608,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v26.11 · ${BUILD_ID}`;
+  badge.textContent = `v26.12 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
@@ -1673,9 +1673,9 @@ try {
       const b = Number(j.key_b_active_builds || 0);
       const lbOn = Boolean(j.load_balancer_enabled);
       if (lbOn) {
-        badge.textContent = `v26.11 · A:${a} B:${b}`;
+        badge.textContent = `v26.12 · A:${a} B:${b}`;
       } else {
-        badge.textContent = `v26.11 · A:${a} (single key)`;
+        badge.textContent = `v26.12 · A:${a} (single key)`;
       }
     } catch {}
   }
@@ -2124,71 +2124,20 @@ async function jnjHandleFiles(input) {
     // shot order that the cursor-walk depends on.
     photos.sort((a, b) => (a.name || "").localeCompare(b.name || "", undefined, { numeric: true, sensitivity: "base" }));
 
-    // v26.11: SKIP-THE-SERVER FAST PATH.
-    // For every photo where our local jsQR pre-scan already confirmed NO
-    // divider QR, we don't need the server to look at it — we know it's
-    // an item photo. We synthesize a response client-side matching the
-    // server's schema. Only photos with a local QR hit OR photos the
-    // pre-scan didn't cover (jsQR failed to load, decode errored, etc.)
-    // get uploaded. On a typical 378-photo sale with ~50 QR dividers,
-    // that's ~50 uploads instead of 378 — ~7-8× fewer server calls.
-    const localPrescan = window.jnjQrPrescan || new Map();
-    const photosToUpload = [];
-    const photosLocallySkipped = [];
-    for (const p of photos) {
-      const pre = localPrescan.get(p.name);
-      if (pre && pre.has_qr === false) {
-        // Confirmed non-divider by local scan — skip server call entirely.
-        photosLocallySkipped.push(p);
-      } else {
-        // Local scan hit a QR, or has no data for this photo. Upload it
-        // so the server can confirm (and generate the item thumbnail).
-        photosToUpload.push(p);
-      }
-    }
-    jnjLog("QR-FAST-PATH", `total=${photos.length}`, `upload=${photosToUpload.length}`, `skipped_locally=${photosLocallySkipped.length}`);
-    statusEl.textContent = `matching photos… ${photosLocallySkipped.length} already scanned locally, ${photosToUpload.length} to upload`;
+    // v26.11.1: REVERTED the client-side skip-the-server fast-path. jsQR
+    // in the browser missed too many real QR cards in v26.11 testing
+    // (angled shots, glare, tight crops) — those photos got skipped
+    // locally as 'no QR' and never reached the server WeChat detector,
+    // so dividers were missed and every photo piled onto item 1.
+    // Server-side WeChat is much stronger than jsQR; only IT gets to say
+    // 'no QR here.' The browser pre-scan (window.jnjQrPrescan) is still
+    // running in the background but is currently informational only.
+    //
+    // Every photo is uploaded to the server as before.
+    const photosToUpload = photos;
+    const synthesizeLocalResponses = async () => [];  // no-op for now
 
-    // Build a synthetic server-style response for the skipped photos so
-    // downstream code (cursor-walk, itemPhotos, unmatched) sees them.
-    // Thumbnails: we generate a small data URL from the file so the UI
-    // has something to render — same as what the server would have made.
-    const synthesizeLocalResponses = async () => {
-      const results = [];
-      for (const f of photosLocallySkipped) {
-        let thumb_data_url = "";
-        try {
-          const bmp = await createImageBitmap(f).catch(() => null);
-          if (bmp) {
-            const scale = Math.min(1, 400 / Math.max(bmp.width, bmp.height));
-            const w = Math.round(bmp.width * scale);
-            const h = Math.round(bmp.height * scale);
-            const c = document.createElement("canvas");
-            c.width = w; c.height = h;
-            c.getContext("2d").drawImage(bmp, 0, 0, w, h);
-            bmp.close && bmp.close();
-            thumb_data_url = c.toDataURL("image/jpeg", 0.75);
-          }
-        } catch {}
-        results.push({
-          filename: f.name,
-          thumb_data_url,
-          tag_read: "",
-          description_read: "",
-          dhash: "",
-          is_blank: false,
-          first_pass: "yes",
-          item_num_match: "",
-          match_kind: "none",
-          divider_score: 0,
-          has_divider_qr: false,
-          ai_thumb_b64: "",
-        });
-      }
-      return results;
-    };
-
-    // ---------- Step 2: process the remaining photos in batches, in parallel ----------
+    // ---------- Step 2: process photos in batches, in parallel ----------
     // Batch size 8 with concurrency 3 means we're running 24 photos through
     // OpenAI simultaneously, which is well under any rate limit and dramatically
     // faster than the old sequential 3-at-a-time approach.
@@ -2207,13 +2156,63 @@ async function jnjHandleFiles(input) {
     // more times with a growing pause. Total worst-case: server 8 retries
     // + client 3 retries = ~11 attempts before we give up on a batch.
     const CLIENT_BATCH_RETRIES = 3;
+
+    // v26.12: Shrink each photo to a small JPEG (~1200px longest edge,
+    // quality 0.72) BEFORE upload. WeChat QR detection and thumbnail
+    // generation don't need the full 4K original — they work perfectly
+    // on a 1200px copy. This cuts upload bytes by roughly 8× with no
+    // effect on match accuracy.
+    //
+    // SAFETY: the original File in `photos` is NEVER mutated. We only
+    // build a compressed Blob for upload. The Download ZIP path uses
+    // the original files from `photos`, so bidders still see full-quality
+    // pictures on the auction site.
+    //
+    // If compression fails for any reason (createImageBitmap unsupported,
+    // out of memory, weird file format), we fall back to uploading the
+    // original file for THAT photo. Never breaks the build.
+    const jnjCompressForUpload = async (file) => {
+      try {
+        // Skip if already small — no point re-encoding a 200KB file.
+        if (file.size < 400 * 1024) return file;
+        const bmp = await createImageBitmap(file);
+        const maxEdge = 1200;
+        const scale = Math.min(1, maxEdge / Math.max(bmp.width, bmp.height));
+        const w = Math.max(1, Math.round(bmp.width * scale));
+        const h = Math.max(1, Math.round(bmp.height * scale));
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(bmp, 0, 0, w, h);
+        if (bmp.close) bmp.close();
+        const blob = await new Promise((res) => canvas.toBlob(res, "image/jpeg", 0.72));
+        if (!blob || blob.size === 0) return file;  // fallback
+        // Wrap in a File so the filename is preserved on the server side.
+        return new File([blob], file.name, { type: "image/jpeg" });
+      } catch (e) {
+        jnjLog("COMPRESS-FAIL", `${file.name}:`, e.message || e);
+        return file;  // graceful fallback — upload the original
+      }
+    };
+
     const runBatch = async (batchIdx) => {
       const label = `Photo batch ${batchIdx + 1}/${batches.length}`;
       let lastErr = null;
       for (let attempt = 1; attempt <= CLIENT_BATCH_RETRIES + 1; attempt++) {
         try {
           const fd = new FormData();
-          for (const p of batches[batchIdx]) fd.append("photos", p);
+          // v26.12: compress each photo in parallel before uploading.
+          const compressed = await Promise.all(
+            batches[batchIdx].map(p => jnjCompressForUpload(p))
+          );
+          let origBytes = 0, sentBytes = 0;
+          for (let i = 0; i < batches[batchIdx].length; i++) {
+            origBytes += batches[batchIdx][i].size;
+            sentBytes += compressed[i].size;
+            fd.append("photos", compressed[i]);
+          }
+          jnjLog("UPLOAD-COMPRESS", `batch ${batchIdx + 1}: ${(origBytes/1024/1024).toFixed(1)}MB → ${(sentBytes/1024/1024).toFixed(1)}MB (${((1-sentBytes/origBytes)*100).toFixed(0)}% smaller)`);
           fd.append("items_json", itemsJson);
           const batchData = await postForJson(JNJ_MATCH_PHOTOS_URL, fd, label);
           results[batchIdx] = batchData.photos || [];
