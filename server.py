@@ -194,9 +194,17 @@ def detect_divider_qr(raw_bytes: bytes) -> bool:
     try:
         with Image.open(io.BytesIO(raw_bytes)) as img:
             rgb = img.convert("RGB")
-            # Two working sizes: 1024 fast-path, 1600 for small-QR photos.
+            # v26.17: downsample HARD before WeChat. Kim's photos come in
+            # at 800x600 native; older code thumbnailed to (1024,1024) which
+            # is a null-op on already-small photos, so WeChat kept chewing
+            # through 480K pixels per photo. Dropping to 500px wide gives us
+            # ~150K pixels per photo (~1/3 the work) while keeping the QR
+            # pattern intact — all 3 finder patterns preserved, no cropping.
+            # QRs decode reliably at any size where the code modules are ≥ 3
+            # pixels each; at 500px wide the modules on Kim's cards are
+            # ~10-15 pixels wide, plenty for detection.
             work1 = rgb.copy()
-            work1.thumbnail((1024, 1024))
+            work1.thumbnail((500, 500))
             gray1 = np.array(work1.convert("L"))
             work1.close()
             # v26.10.2: gray2 only needed if wide-frame or extra passes
@@ -211,18 +219,11 @@ def detect_divider_qr(raw_bytes: bytes) -> bool:
                 work2.close()
             rgb.close()
 
-        # v26.16.2: TOP-70% ONLY. Ashley's call — skip full-frame and all
-        # crop fallbacks. Kim's photos always have the JNJ watermark across
-        # the bottom and the divider card always sits in the top portion of
-        # the frame (shot flat, from above). Running just one WeChat decode
-        # on the top 70% is both the fastest AND cleanest approach: no
-        # watermark noise, no wasted decodes on shots that will never contain
-        # a QR anyway. Trade-off: if Kim ever tilts a shot so the QR lands
-        # in the bottom, we'll miss it — but she never has.
-        h, w = gray1.shape[:2]
-        top = gray1[:int(h * 0.70), :]
-        if _hits_divider(_wechat_decode(top)):
-            return True
+        # v26.17: Full-frame WeChat + stock on the downsampled 500px image.
+        # Same detection logic as v26.13/v26.16.3, but ~1/3 the pixel work.
+        for decode in (_wechat_decode, _stock_decode):
+            if _hits_divider(decode(gray1)):
+                return True
 
         # v26.13: Pass 2 (rotations) DISABLED. WeChat is already rotation-
         # tolerant on straight-on cards, and Kim/Philip always shoot the
@@ -2880,7 +2881,7 @@ async def jnj_diag():
         "recent_openai_failures": _openai_failure_count_recent(),
         "failure_threshold": _OPENAI_FAILURE_THRESHOLD,
         "python_version": _sys.version.split()[0],
-        "build_id": "2026-09-21-v26.16.2-top-only-strict",
+        "build_id": "2026-09-21-v26.17-downsample-500",
     })
 
 
