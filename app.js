@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-09-21-v26.13-pass-1-only";
+const BUILD_ID = "2026-09-21-v26.14-trust-drop-order";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v26.13 boot. BUILD_ID:", "2026-09-21-v26.13-pass-1-only");
+jnjLog("BOOT", "v26.14 boot. BUILD_ID:", "2026-09-21-v26.14-trust-drop-order");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -1608,7 +1608,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v26.13 · ${BUILD_ID}`;
+  badge.textContent = `v26.14 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
@@ -1673,9 +1673,9 @@ try {
       const b = Number(j.key_b_active_builds || 0);
       const lbOn = Boolean(j.load_balancer_enabled);
       if (lbOn) {
-        badge.textContent = `v26.13 · A:${a} B:${b}`;
+        badge.textContent = `v26.14 · A:${a} B:${b}`;
       } else {
-        badge.textContent = `v26.13 · A:${a} (single key)`;
+        badge.textContent = `v26.14 · A:${a} (single key)`;
       }
     } catch {}
   }
@@ -2117,12 +2117,12 @@ async function jnjHandleFiles(input) {
     // correctly regardless of digit count) BEFORE batching. Kim shoots
     // in order: divider → lot photos → divider → lot photos … and the
     // filenames come out sequential (IMG_0344, IMG_0345, ...). But the
-    // browser hands us files in whatever order Finder sorted them or
-    // the user dropped them, NOT filename order. That's why photos were
-    // ending up in wrong lots — the divider positions were correct, but
-    // the photos between them were shuffled. Sorting here restores the
-    // shot order that the cursor-walk depends on.
-    photos.sort((a, b) => (a.name || "").localeCompare(b.name || "", undefined, { numeric: true, sensitivity: "base" }));
+    // v26.14: Ashley confirmed Dave always shoots in sequence and files
+    // ALWAYS come in numeric order from the camera. Trust the drop order.
+    // If a specific browser/drop combo ever hands them scrambled, add the
+    // sort back:
+    //   photos.sort((a, b) => (a.name || "").localeCompare(b.name || "", undefined, { numeric: true, sensitivity: "base" }));
+    jnjLog("PHOTO-ORDER", `Using drop order for ${photos.length} photos (no name sort). First:`, photos[0]?.name, "Last:", photos[photos.length-1]?.name);
 
     // v26.11.1: REVERTED the client-side skip-the-server fast-path. jsQR
     // in the browser missed too many real QR cards in v26.11 testing
