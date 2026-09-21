@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-09-20-v26.9.1-pass8-off";
+const BUILD_ID = "2026-09-20-v26.10.1-photo-sort";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v26.9.1 boot. BUILD_ID:", "2026-09-20-v26.9.1-pass8-off");
+jnjLog("BOOT", "v26.10.1 boot. BUILD_ID:", "2026-09-20-v26.10.1-photo-sort");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -1608,7 +1608,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v26.9.1 · ${BUILD_ID}`;
+  badge.textContent = `v26.10.1 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
@@ -1673,9 +1673,9 @@ try {
       const b = Number(j.key_b_active_builds || 0);
       const lbOn = Boolean(j.load_balancer_enabled);
       if (lbOn) {
-        badge.textContent = `v26.9.1 · A:${a} B:${b}`;
+        badge.textContent = `v26.10.1 · A:${a} B:${b}`;
       } else {
-        badge.textContent = `v26.9.1 · A:${a} (single key)`;
+        badge.textContent = `v26.10.1 · A:${a} (single key)`;
       }
     } catch {}
   }
@@ -2014,6 +2014,18 @@ async function jnjHandleFiles(input) {
       throw new Error("No items left after review — nothing to build.");
     }
     statusEl.textContent = `review complete — ${items.length} items. Matching ${photos.length} photos…`;
+
+    // v26.10.1: THE fix that was missing all along. Sort photos by
+    // filename (natural sort so IMG_0349 < IMG_0361 < IMG_0433 works
+    // correctly regardless of digit count) BEFORE batching. Kim shoots
+    // in order: divider → lot photos → divider → lot photos … and the
+    // filenames come out sequential (IMG_0344, IMG_0345, ...). But the
+    // browser hands us files in whatever order Finder sorted them or
+    // the user dropped them, NOT filename order. That's why photos were
+    // ending up in wrong lots — the divider positions were correct, but
+    // the photos between them were shuffled. Sorting here restores the
+    // shot order that the cursor-walk depends on.
+    photos.sort((a, b) => (a.name || "").localeCompare(b.name || "", undefined, { numeric: true, sensitivity: "base" }));
 
     // ---------- Step 2: process photos in batches, in parallel ----------
     // Batch size 8 with concurrency 3 means we're running 24 photos through
@@ -2672,11 +2684,26 @@ function jnjRenderPreview() {
     });
     card.addEventListener("drop", (e) => {
       // Case 1: existing lot-to-lot photo move.
+      // v26.10: If the drag carries a JSON list of filenames (multi-select),
+      // move all of them. Otherwise fall back to the single-photo string.
       if (e.dataTransfer.types.includes("application/x-jnj-photo")) {
         e.preventDefault();
         card.classList.remove("drag-over");
-        const fname = e.dataTransfer.getData("application/x-jnj-photo");
-        jnjMovePhotoTo(fname, it._row_key);
+        let fnames = [];
+        const listPayload = e.dataTransfer.getData("application/x-jnj-photo-list");
+        if (listPayload) {
+          try { fnames = JSON.parse(listPayload); } catch { fnames = []; }
+        }
+        if (!fnames.length) {
+          const single = e.dataTransfer.getData("application/x-jnj-photo");
+          if (single) fnames = [single];
+        }
+        fnames.forEach(f => jnjMovePhotoTo(f, it._row_key, /*skipRender=*/true));
+        if (fnames.length > 1) toast(`Moved ${fnames.length} photos to ${it.item_num}.`);
+        jnjSelectedPhotos.clear();
+        jnjSelectedPhoto = null;
+        jnjLastClickedPhoto = null;
+        jnjRenderPreview();
         return;
       }
       // Case 2 (v26): OS file drop from Finder — add to THIS lot only.
@@ -2703,11 +2730,25 @@ function jnjRenderPreview() {
   });
   jnjUnmatched.addEventListener("dragleave", () => jnjUnmatched.classList.remove("drag-over"));
   jnjUnmatched.addEventListener("drop", (e) => {
+    // v26.10: multi-select aware — unpack the list if present.
     if (!e.dataTransfer.types.includes("application/x-jnj-photo")) return;
     e.preventDefault();
     jnjUnmatched.classList.remove("drag-over");
-    const fname = e.dataTransfer.getData("application/x-jnj-photo");
-    jnjMovePhotoTo(fname, null);
+    let fnames = [];
+    const listPayload = e.dataTransfer.getData("application/x-jnj-photo-list");
+    if (listPayload) {
+      try { fnames = JSON.parse(listPayload); } catch { fnames = []; }
+    }
+    if (!fnames.length) {
+      const single = e.dataTransfer.getData("application/x-jnj-photo");
+      if (single) fnames = [single];
+    }
+    fnames.forEach(f => jnjMovePhotoTo(f, null, /*skipRender=*/true));
+    if (fnames.length > 1) toast(`Moved ${fnames.length} photos back to unmatched.`);
+    jnjSelectedPhotos.clear();
+    jnjSelectedPhoto = null;
+    jnjLastClickedPhoto = null;
+    jnjRenderPreview();
   });
 
   // v25.59: wire up per-sheet "Renumber from…" buttons. Ashley enters the
@@ -2773,15 +2814,37 @@ function jnjRenderPreview() {
   });
 
   // Wire up all thumbs (drag handlers)
+  // v26.10: Multi-select support. If the user has multiple photos
+  // selected (Cmd/Ctrl+click or Shift+click added them), dragging ANY
+  // one of them drags the whole selection. The dataTransfer payload
+  // carries a JSON list of filenames when there are multiple selected,
+  // and stays as a single filename when there's only one. Drop targets
+  // check for the JSON list first, falling back to the single-photo
+  // string for backward compatibility.
   document.querySelectorAll(".jnj-photo-thumb").forEach(el => {
     el.setAttribute("draggable", "true");
     el.addEventListener("dragstart", (e) => {
       const fname = el.dataset.filename;
-      e.dataTransfer.setData("application/x-jnj-photo", fname);
+      // If the dragged photo is part of a multi-selection, drag the whole set.
+      // Otherwise, treat it as a fresh single-photo drag.
+      let payload = [fname];
+      if (jnjSelectedPhotos && jnjSelectedPhotos.size > 1 && jnjSelectedPhotos.has(fname)) {
+        payload = Array.from(jnjSelectedPhotos);
+      }
+      e.dataTransfer.setData("application/x-jnj-photo", payload[0]);
+      e.dataTransfer.setData("application/x-jnj-photo-list", JSON.stringify(payload));
       e.dataTransfer.effectAllowed = "move";
       el.classList.add("dragging");
+      // Mark all photos in the selection as visually dragging.
+      if (payload.length > 1) {
+        document.querySelectorAll(".jnj-photo-thumb").forEach(t => {
+          if (payload.includes(t.dataset.filename)) t.classList.add("dragging");
+        });
+      }
     });
-    el.addEventListener("dragend", () => el.classList.remove("dragging"));
+    el.addEventListener("dragend", () => {
+      document.querySelectorAll(".jnj-photo-thumb.dragging").forEach(t => t.classList.remove("dragging"));
+    });
     // Remove-photo button (X)
     const rm = el.querySelector(".jnj-photo-remove");
     if (rm) rm.addEventListener("click", (e) => {
@@ -2838,8 +2901,17 @@ function jnjMakePhotoMain(fname) {
   jnjRenderPreview();
 }
 
-// Mobile tap-to-assign: tap a photo to select it, tap an item card to assign.
-let jnjSelectedPhoto = null;
+// Mobile tap-to-assign + v26.10 multi-select.
+//   - Plain click on a photo: select it (single). Click same photo again to deselect.
+//   - Cmd/Ctrl+click: toggle that photo's membership in the selection set.
+//   - Shift+click: extend the selection from the last-clicked photo to this one
+//     (in DOM order — how they appear on screen).
+//   - Click an item card with a selection: move ALL selected photos there.
+//   - Click the Unmatched area with a selection: unassign ALL selected.
+//   - Click empty space: clear the selection.
+let jnjSelectedPhoto = null;       // legacy single (kept for backward-compat)
+let jnjSelectedPhotos = new Set(); // v26.10 multi-select set
+let jnjLastClickedPhoto = null;    // anchor for shift+click range
 document.addEventListener("click", (e) => {
   if (!jnjState) return;
   // Ignore remove-button clicks — they have their own handler
@@ -2850,37 +2922,91 @@ document.addEventListener("click", (e) => {
 
   const thumb = e.target.closest(".jnj-photo-thumb");
   const itemCard = e.target.closest(".jnj-item-card");
+  const isMeta = e.metaKey || e.ctrlKey;
+  const isShift = e.shiftKey;
 
   if (thumb) {
-    // Tap a photo -> select it (or unselect if already selected)
     const fname = thumb.dataset.filename;
-    jnjSelectedPhoto = (jnjSelectedPhoto === fname) ? null : fname;
-    if (jnjSelectedPhoto) {
-      toast(`Selected photo. Now tap an item to assign it (or the Unmatched area to unassign).`);
+
+    if (isShift && jnjLastClickedPhoto) {
+      // Shift+click: select every photo in DOM order between anchor and this one
+      const allThumbs = Array.from(document.querySelectorAll(".jnj-photo-thumb"));
+      const names = allThumbs.map(t => t.dataset.filename);
+      const a = names.indexOf(jnjLastClickedPhoto);
+      const b = names.indexOf(fname);
+      if (a >= 0 && b >= 0) {
+        const [lo, hi] = a < b ? [a, b] : [b, a];
+        for (let i = lo; i <= hi; i++) jnjSelectedPhotos.add(names[i]);
+      } else {
+        jnjSelectedPhotos.add(fname);
+      }
+      jnjSelectedPhoto = fname;
+      toast(`${jnjSelectedPhotos.size} photos selected. Drag one to move them all.`);
+    } else if (isMeta) {
+      // Cmd/Ctrl+click: toggle this photo in the selection set
+      if (jnjSelectedPhotos.has(fname)) {
+        jnjSelectedPhotos.delete(fname);
+      } else {
+        jnjSelectedPhotos.add(fname);
+      }
+      jnjLastClickedPhoto = fname;
+      jnjSelectedPhoto = jnjSelectedPhotos.size === 1 ? Array.from(jnjSelectedPhotos)[0] : null;
+      if (jnjSelectedPhotos.size > 1) {
+        toast(`${jnjSelectedPhotos.size} photos selected. Drag one to move them all.`);
+      }
+    } else {
+      // Plain click: single-select (or deselect if it was the only one)
+      if (jnjSelectedPhotos.size === 1 && jnjSelectedPhotos.has(fname)) {
+        jnjSelectedPhotos.clear();
+        jnjSelectedPhoto = null;
+        jnjLastClickedPhoto = null;
+      } else {
+        jnjSelectedPhotos.clear();
+        jnjSelectedPhotos.add(fname);
+        jnjSelectedPhoto = fname;
+        jnjLastClickedPhoto = fname;
+        toast(`Selected photo. Cmd+click to add more, then tap an item card to assign.`);
+      }
     }
     jnjRenderPreview();
-  } else if (itemCard && jnjSelectedPhoto) {
-    // Tap an item card with a selected photo -> assign
-    // v25.73: pass row_key (unique) to the mover; keep item_num for the toast.
+  } else if (itemCard && jnjSelectedPhotos.size > 0) {
+    // Click an item card with selected photos -> assign all of them
     const rowKey = itemCard.dataset.rowKey || itemCard.dataset.itemNum;
     const itemNum = itemCard.dataset.itemNum;
     if (rowKey) {
-      jnjMovePhotoTo(jnjSelectedPhoto, rowKey);
-      toast(`Assigned to ${itemNum}.`);
+      const toMove = Array.from(jnjSelectedPhotos);
+      toMove.forEach(f => jnjMovePhotoTo(f, rowKey, /*skipRender=*/true));
+      toast(`Assigned ${toMove.length} photo${toMove.length === 1 ? "" : "s"} to ${itemNum}.`);
+      jnjSelectedPhotos.clear();
       jnjSelectedPhoto = null;
+      jnjLastClickedPhoto = null;
+      jnjRenderPreview();
     }
-  } else if (jnjSelectedPhoto && e.target.closest("#jnjUnmatched")) {
-    // Tap unmatched area with a selected photo -> unassign
-    jnjMovePhotoTo(jnjSelectedPhoto, null);
-    toast("Moved back to unmatched.");
+  } else if (jnjSelectedPhotos.size > 0 && e.target.closest("#jnjUnmatched")) {
+    // Click Unmatched with a selection -> unassign all selected
+    const toMove = Array.from(jnjSelectedPhotos);
+    toMove.forEach(f => jnjMovePhotoTo(f, null, /*skipRender=*/true));
+    toast(`Moved ${toMove.length} photo${toMove.length === 1 ? "" : "s"} back to unmatched.`);
+    jnjSelectedPhotos.clear();
     jnjSelectedPhoto = null;
+    jnjLastClickedPhoto = null;
+    jnjRenderPreview();
+  } else if (!thumb && !itemCard && jnjSelectedPhotos.size > 0) {
+    // Click empty area -> clear selection
+    jnjSelectedPhotos.clear();
+    jnjSelectedPhoto = null;
+    jnjLastClickedPhoto = null;
+    jnjRenderPreview();
   }
 });
 
 // v25.73: `target` is now a _row_key (unique) rather than item_num.
 // Callers pass it.item_num pre-25.73 or it._row_key from 25.73 on;
 // we resolve either one to the correct bucket for backward compatibility.
-function jnjMovePhotoTo(fname, target) {
+// v26.10: added optional `skipRender` — when moving many photos in a
+// loop (multi-select drop or bulk assign), pass true to defer the
+// expensive jnjRenderPreview() call until after the last move.
+function jnjMovePhotoTo(fname, target, skipRender = false) {
   if (!jnjState) return;
   // Remove from wherever it currently is
   for (const key of Object.keys(jnjState.itemPhotos)) {
@@ -2911,7 +3037,7 @@ function jnjMovePhotoTo(fname, target) {
       }
     }
   }
-  jnjRenderPreview();
+  if (!skipRender) jnjRenderPreview();
 }
 
 /* -------------------- v26: Add photos to a specific lot from Finder -----
