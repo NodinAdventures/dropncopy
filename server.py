@@ -1218,7 +1218,14 @@ async def _fact_check_transcript(image_bytes: bytes, media_type: str, transcript
         "a lot code is NEVER 5+ chars — those extra digits belong to the description)\n"
         "  3. Missing or wrong words in descriptions\n"
         "  4. Rows that got merged when they should be separate, or split when "
-        "they should be one row\n\n"
+        "they should be one row\n"
+        "  5. CROSSED-OUT rows: if a row has been heavily scribbled/crossed out "
+        "by the seller (thick horizontal lines through the entire row obscuring "
+        "most or all of the writing), DROP THAT ROW ENTIRELY from your output. "
+        "The seller deliberately voided it. Do NOT emit a placeholder like "
+        "'ILLEGIBLE' or 'CROSSED OUT' — just skip the row so it never becomes "
+        "a listing. A single strike through one word is NOT a full crossout; "
+        "only drop rows where the whole row is scribbled out.\n\n"
         "Rules for your corrected output:\n"
         "  - EXACT same format as the input: one row per line, ITEM_NUMBER "
         "LOT_CODE DESCRIPTION separated by single spaces\n"
@@ -1268,10 +1275,13 @@ async def _fact_check_transcript(image_bytes: bytes, media_type: str, transcript
         lines = [l for l in lines if not l.strip().startswith("```")]
         checked = "\n".join(lines).strip()
     # Sanitize + safety: reject if the checked output has WAY fewer rows than
-    # the input (fact-checker should never delete most of the sheet).
+    # the input. v26.17.5 relaxed this so the fact-checker can legitimately
+    # drop crossed-out rows; only reject if it drops MORE THAN HALF the rows
+    # (that would indicate the fact-checker went haywire, not just skipping
+    # a couple of scribbled-out entries).
     orig_lines = [l for l in transcript.splitlines() if l.strip()]
     checked_lines = [l for l in checked.splitlines() if l.strip()]
-    if len(checked_lines) < max(1, len(orig_lines) - 2) and len(orig_lines) >= 3:
+    if len(orig_lines) >= 4 and len(checked_lines) < (len(orig_lines) // 2):
         print(f"[fact-check] rejected — dropped too many rows ({len(orig_lines)} → {len(checked_lines)})", flush=True)
         return transcript
     print(f"[fact-check] {len(orig_lines)} rows in → {len(checked_lines)} rows out", flush=True)
@@ -3002,7 +3012,7 @@ async def jnj_diag():
         "recent_openai_failures": _openai_failure_count_recent(),
         "failure_threshold": _OPENAI_FAILURE_THRESHOLD,
         "python_version": _sys.version.split()[0],
-        "build_id": "2026-09-21-v26.17.4-factcheck-plus-locationrule",
+        "build_id": "2026-09-21-v26.17.5-drop-crossed-out",
     })
 
 
