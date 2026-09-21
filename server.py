@@ -2881,7 +2881,7 @@ async def jnj_diag():
         "recent_openai_failures": _openai_failure_count_recent(),
         "failure_threshold": _OPENAI_FAILURE_THRESHOLD,
         "python_version": _sys.version.split()[0],
-        "build_id": "2026-09-21-v26.17-downsample-500",
+        "build_id": "2026-09-21-v26.17.2-no-yellow-warn",
     })
 
 
