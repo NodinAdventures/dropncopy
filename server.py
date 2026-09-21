@@ -231,39 +231,38 @@ def detect_divider_qr(raw_bytes: bytes) -> bool:
             if _hits_divider(decode(cropped)):
                 return True
 
-        # v26.7: Pass 5 — aggressive contrast/threshold passes. Real-world
-        # divider photos of the printed card often fail because of glare,
-        # screen-of-screen (Ashley photographing preview of divider on her
-        # Mac), or dim ambient light. Try three normalizations:
-        #   a) CLAHE contrast-limited adaptive histogram equalization
-        #   b) Otsu binary threshold (pure black/white)
-        #   c) inverted Otsu (in case the QR is white-on-black already)
-        try:
-            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-            g_clahe = clahe.apply(gray2)
-            for decode in (_wechat_decode, _stock_decode):
-                if _hits_divider(decode(g_clahe)):
-                    return True
-            _thr, g_otsu = cv2.threshold(gray2, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            for decode in (_wechat_decode, _stock_decode):
-                if _hits_divider(decode(g_otsu)):
-                    return True
-            _thr, g_inv = cv2.threshold(gray2, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-            for decode in (_wechat_decode, _stock_decode):
-                if _hits_divider(decode(g_inv)):
-                    return True
-        except Exception as e:
-            print(f"QR pass5 failed: {type(e).__name__}: {e}", flush=True)
+        # v26.10: Pass 5, 6, 7 DISABLED. Ashley's call: restore the fast
+        # path (Passes 1-4 only) that ran under 2 min in v25.x/v26.6.
+        # Passes 5-7 (added in v26.7) each added ~10 decode attempts per
+        # photo to catch glare/dim-light/screen-of-screen edge cases.
+        # That accuracy cost 12+ extra minutes on a 378-photo sale.
+        # Occasional missed dividers are handled manually via drag-drop
+        # or the "retry match" button per lot. Flip _EXTRA_PASSES = True
+        # in one line if we ever want the thorough pipeline back.
+        _EXTRA_PASSES = False
+        if _EXTRA_PASSES:
+            try:
+                clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+                g_clahe = clahe.apply(gray2)
+                for decode in (_wechat_decode, _stock_decode):
+                    if _hits_divider(decode(g_clahe)):
+                        return True
+                _thr, g_otsu = cv2.threshold(gray2, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                for decode in (_wechat_decode, _stock_decode):
+                    if _hits_divider(decode(g_otsu)):
+                        return True
+                _thr, g_inv = cv2.threshold(gray2, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+                for decode in (_wechat_decode, _stock_decode):
+                    if _hits_divider(decode(g_inv)):
+                        return True
+            except Exception as e:
+                print(f"QR pass5 failed: {type(e).__name__}: {e}", flush=True)
 
-        # v26.7: Pass 6 — tighter 50% and 40% center crops. When Kim
-        # holds the card close and it fills most of the frame, the QR
-        # itself is centered and huge; a tighter crop keeps only the
-        # QR modules and drops noisy borders.
-        for frac in (0.55, 0.40):
-            crop_n = _center_crop(gray2, frac)
-            for decode in (_wechat_decode, _stock_decode):
-                if _hits_divider(decode(crop_n)):
-                    return True
+            for frac in (0.55, 0.40):
+                crop_n = _center_crop(gray2, frac)
+                for decode in (_wechat_decode, _stock_decode):
+                    if _hits_divider(decode(crop_n)):
+                        return True
 
         # v26.9.1: Pass 8 DISABLED. In v26.9 test on 378-photo sale,
         # Pass 8's "any visible QR pattern counts" logic false-positived
