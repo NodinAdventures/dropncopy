@@ -211,38 +211,17 @@ def detect_divider_qr(raw_bytes: bytes) -> bool:
                 work2.close()
             rgb.close()
 
-        # v26.16.1: TOP-half first. Kim's photos have a JNJ ONLINE AUCTION
-        # watermark banner across the BOTTOM of every shot — including on
-        # divider cards. Running WeChat on the bottom half wastes time on
-        # watermark text patterns. QR cards are always framed in the upper
-        # 2/3 of the shot with the watermark below, so scanning just the top
-        # portion catches virtually every divider AND avoids the watermark.
+        # v26.16.2: TOP-70% ONLY. Ashley's call — skip full-frame and all
+        # crop fallbacks. Kim's photos always have the JNJ watermark across
+        # the bottom and the divider card always sits in the top portion of
+        # the frame (shot flat, from above). Running just one WeChat decode
+        # on the top 70% is both the fastest AND cleanest approach: no
+        # watermark noise, no wasted decodes on shots that will never contain
+        # a QR anyway. Trade-off: if Kim ever tilts a shot so the QR lands
+        # in the bottom, we'll miss it — but she never has.
         h, w = gray1.shape[:2]
-        # Top 70% — excludes the watermark band at the bottom of every photo.
         top = gray1[:int(h * 0.70), :]
         if _hits_divider(_wechat_decode(top)):
-            return True
-
-        # Pass 1: full-frame fallback — WeChat + stock on the full grayscale.
-        # Runs only when the top-70% crop misses. Catches weird framings
-        # where the QR ended up low in the shot despite the watermark.
-        for decode in (_wechat_decode, _stock_decode):
-            if _hits_divider(decode(gray1)):
-                return True
-
-        # Pass 1.5: remaining crops when everything above misses. Only ~1-2%
-        # of photos ever reach this stage on Kim's sales.
-        # 60% center crop — catches QRs shot small and dead-center.
-        crop60 = _center_crop(gray1, 0.6)
-        if _hits_divider(_wechat_decode(crop60)):
-            return True
-        # Left half
-        left_half = gray1[:, :w//2 + 50]
-        if _hits_divider(_wechat_decode(left_half)):
-            return True
-        # Right half
-        right_half = gray1[:, w//2 - 50:]
-        if _hits_divider(_wechat_decode(right_half)):
             return True
 
         # v26.13: Pass 2 (rotations) DISABLED. WeChat is already rotation-
@@ -2901,7 +2880,7 @@ async def jnj_diag():
         "recent_openai_failures": _openai_failure_count_recent(),
         "failure_threshold": _OPENAI_FAILURE_THRESHOLD,
         "python_version": _sys.version.split()[0],
-        "build_id": "2026-09-21-v26.16.1-top-only",
+        "build_id": "2026-09-21-v26.16.2-top-only-strict",
     })
 
 
