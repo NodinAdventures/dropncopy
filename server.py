@@ -1212,20 +1212,31 @@ async def _fact_check_transcript(image_bytes: bytes, media_type: str, transcript
     data_url = f"data:{media_type};base64,{b64}"
     check_prompt = (
         "You just transcribed this intake sheet. Below is what you wrote. "
-        "Compare it to the sheet image ROW BY ROW and fix ANY mistakes:\n"
+        "Compare it to the sheet image ROW BY ROW.\n\n"
+        "BE EXTREMELY CONSERVATIVE. Only change something if you are 100% "
+        "certain the first pass got it wrong AND you can clearly read the "
+        "correct value on the sheet. If there is ANY doubt — even 1% — "
+        "leave the row exactly as-is. A 'close match' or 'probably wrong' "
+        "is NOT a reason to change anything. Only fix confident, obvious "
+        "errors. When in doubt, keep the first pass.\n\n"
+        "What you MAY fix (only if 100% certain):\n"
         "  1. Wrong item numbers (compare far-left column)\n"
         "  2. Wrong lot / location codes (short 1-4 char code in column 2; "
         "a lot code is NEVER 5+ chars — those extra digits belong to the description)\n"
-        "  3. Missing or wrong words in descriptions\n"
+        "  3. Missing or wrong words in descriptions — only if you can "
+        "CLEARLY read what the seller wrote\n"
         "  4. Rows that got merged when they should be separate, or split when "
-        "they should be one row\n"
-        "  5. CROSSED-OUT rows: if a row has been heavily scribbled/crossed out "
-        "by the seller (thick horizontal lines through the entire row obscuring "
-        "most or all of the writing), DROP THAT ROW ENTIRELY from your output. "
-        "The seller deliberately voided it. Do NOT emit a placeholder like "
-        "'ILLEGIBLE' or 'CROSSED OUT' — just skip the row so it never becomes "
-        "a listing. A single strike through one word is NOT a full crossout; "
-        "only drop rows where the whole row is scribbled out.\n\n"
+        "they should be one row\n\n"
+        "CROSSED-OUT DESCRIPTIONS — KEEP THE ROW:\n"
+        "If a row's DESCRIPTION has been scribbled/crossed out but the item "
+        "number and lot code are still readable, KEEP THE ROW with the item "
+        "number and lot code intact, and leave the description blank (empty "
+        "string). Do NOT drop rows with scribbles. Do NOT emit placeholders "
+        "like 'ILLEGIBLE' or 'CROSSED OUT'. Just: ITEM_NUMBER LOT_CODE (nothing after).\n\n"
+        "The ONLY time to drop a row entirely: when the ITEM NUMBER itself "
+        "is scribbled out AND the lot code is scribbled out too (the seller "
+        "voided the whole row before writing anything meaningful). Even then, "
+        "if you can read the item number clearly, keep the row.\n\n"
         "Rules for your corrected output:\n"
         "  - EXACT same format as the input: one row per line, ITEM_NUMBER "
         "LOT_CODE DESCRIPTION separated by single spaces\n"
@@ -1235,8 +1246,7 @@ async def _fact_check_transcript(image_bytes: bytes, media_type: str, transcript
         "  - If a row's description starts with a number+unit like '26 pcs', "
         "'5 pc', '11 pcs', '3 ft', that number belongs to the DESCRIPTION, "
         "not the lot code\n"
-        "  - Do NOT change anything you can't clearly verify against the sheet. "
-        "When in doubt, leave the row as-is.\n"
+        "  - Rows with a crossed-out description keep item# and lot code, description blank\n"
         "  - Output ONLY the corrected transcript. No commentary. No explanations. "
         "No markdown fences.\n\n"
         "First-pass transcript to check:\n\n"
@@ -3012,7 +3022,7 @@ async def jnj_diag():
         "recent_openai_failures": _openai_failure_count_recent(),
         "failure_threshold": _OPENAI_FAILURE_THRESHOLD,
         "python_version": _sys.version.split()[0],
-        "build_id": "2026-09-21-v26.17.5-drop-crossed-out",
+        "build_id": "2026-09-21-v26.17.6-keep-rows-conservative",
     })
 
 
