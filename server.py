@@ -216,6 +216,37 @@ def detect_divider_qr(raw_bytes: bytes) -> bool:
             if _hits_divider(decode(gray1)):
                 return True
 
+        # v26.15: Pass 1.5 — crop retries when Pass 1 misses.
+        # Ashley's FILE-47 test showed WeChat missed photo 006 (an 800x600
+        # divider card that fills the frame). Cause: at 1024px the QR
+        # pattern occupies most of the image — too large for WeChat's
+        # trained scale range. Solution: try smaller crops that make the
+        # QR pattern relatively smaller within the frame.
+        # These 5 extra decodes only run on photos that failed Pass 1,
+        # which is a small fraction (~5-15 out of 300+). Total cost on a
+        # 343-photo sale: ~5-8 sec added. Fast, targeted retry.
+        h, w = gray1.shape[:2]
+        # 60% center crop — same as _center_crop(gray1, 0.6)
+        crop60 = _center_crop(gray1, 0.6)
+        if _hits_divider(_wechat_decode(crop60)):
+            return True
+        # Top half
+        top_half = gray1[:h//2 + 50, :]  # slight overlap in case QR spans midline
+        if _hits_divider(_wechat_decode(top_half)):
+            return True
+        # Bottom half
+        bot_half = gray1[h//2 - 50:, :]
+        if _hits_divider(_wechat_decode(bot_half)):
+            return True
+        # Left half
+        left_half = gray1[:, :w//2 + 50]
+        if _hits_divider(_wechat_decode(left_half)):
+            return True
+        # Right half
+        right_half = gray1[:, w//2 - 50:]
+        if _hits_divider(_wechat_decode(right_half)):
+            return True
+
         # v26.13: Pass 2 (rotations) DISABLED. WeChat is already rotation-
         # tolerant on straight-on cards, and Kim/Philip always shoot the
         # divider card head-on. Running 6 extra decodes per non-divider
@@ -302,12 +333,13 @@ def detect_divider_qr(raw_bytes: bytes) -> bool:
         # v26.7: Pass 7 — debug log the FIRST decoded text (whether or
         # not it hit divider) so Ashley can see in the Render log WHY a
         # given photo missed. Runs only on final failure, cheap.
+        # v26.15: use gray1 since gray2 is None when wide-frame passes off.
         try:
-            probe = _wechat_decode(gray2) or _stock_decode(gray2)
+            probe = _wechat_decode(gray1) or _stock_decode(gray1)
             if probe:
                 print(f"QR-DEBUG: decoded but didn't match divider: {probe!r}", flush=True)
             else:
-                print(f"QR-DEBUG: no QR decoded after 8 passes", flush=True)
+                print(f"QR-DEBUG: no QR decoded after all passes", flush=True)
         except Exception:
             pass
 
@@ -2871,7 +2903,7 @@ async def jnj_diag():
         "recent_openai_failures": _openai_failure_count_recent(),
         "failure_threshold": _OPENAI_FAILURE_THRESHOLD,
         "python_version": _sys.version.split()[0],
-        "build_id": "2026-09-21-v26.13-pass-1-only",
+        "build_id": "2026-09-21-v26.15-crop-retry",
     })
 
 
