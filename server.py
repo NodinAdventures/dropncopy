@@ -211,32 +211,30 @@ def detect_divider_qr(raw_bytes: bytes) -> bool:
                 work2.close()
             rgb.close()
 
-        # Pass 1: fast path — WeChat + stock on 1024 grayscale.
+        # v26.16.1: TOP-half first. Kim's photos have a JNJ ONLINE AUCTION
+        # watermark banner across the BOTTOM of every shot — including on
+        # divider cards. Running WeChat on the bottom half wastes time on
+        # watermark text patterns. QR cards are always framed in the upper
+        # 2/3 of the shot with the watermark below, so scanning just the top
+        # portion catches virtually every divider AND avoids the watermark.
+        h, w = gray1.shape[:2]
+        # Top 70% — excludes the watermark band at the bottom of every photo.
+        top = gray1[:int(h * 0.70), :]
+        if _hits_divider(_wechat_decode(top)):
+            return True
+
+        # Pass 1: full-frame fallback — WeChat + stock on the full grayscale.
+        # Runs only when the top-70% crop misses. Catches weird framings
+        # where the QR ended up low in the shot despite the watermark.
         for decode in (_wechat_decode, _stock_decode):
             if _hits_divider(decode(gray1)):
                 return True
 
-        # v26.15: Pass 1.5 — crop retries when Pass 1 misses.
-        # Ashley's FILE-47 test showed WeChat missed photo 006 (an 800x600
-        # divider card that fills the frame). Cause: at 1024px the QR
-        # pattern occupies most of the image — too large for WeChat's
-        # trained scale range. Solution: try smaller crops that make the
-        # QR pattern relatively smaller within the frame.
-        # These 5 extra decodes only run on photos that failed Pass 1,
-        # which is a small fraction (~5-15 out of 300+). Total cost on a
-        # 343-photo sale: ~5-8 sec added. Fast, targeted retry.
-        h, w = gray1.shape[:2]
-        # 60% center crop — same as _center_crop(gray1, 0.6)
+        # Pass 1.5: remaining crops when everything above misses. Only ~1-2%
+        # of photos ever reach this stage on Kim's sales.
+        # 60% center crop — catches QRs shot small and dead-center.
         crop60 = _center_crop(gray1, 0.6)
         if _hits_divider(_wechat_decode(crop60)):
-            return True
-        # Top half
-        top_half = gray1[:h//2 + 50, :]  # slight overlap in case QR spans midline
-        if _hits_divider(_wechat_decode(top_half)):
-            return True
-        # Bottom half
-        bot_half = gray1[h//2 - 50:, :]
-        if _hits_divider(_wechat_decode(bot_half)):
             return True
         # Left half
         left_half = gray1[:, :w//2 + 50]
@@ -2903,7 +2901,7 @@ async def jnj_diag():
         "recent_openai_failures": _openai_failure_count_recent(),
         "failure_threshold": _OPENAI_FAILURE_THRESHOLD,
         "python_version": _sys.version.split()[0],
-        "build_id": "2026-09-21-v26.15-crop-retry",
+        "build_id": "2026-09-21-v26.16.1-top-only",
     })
 
 
