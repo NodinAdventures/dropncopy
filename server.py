@@ -216,13 +216,18 @@ def detect_divider_qr(raw_bytes: bytes) -> bool:
             if _hits_divider(decode(gray1)):
                 return True
 
-        # Pass 2: rotations at 1024. WeChat is normally rotation-tolerant
-        # but real phone photos with hard perspective can still miss.
-        for arr in _rotate_variants(gray1):
-            if _hits_divider(_wechat_decode(arr)):
-                return True
-            if _hits_divider(_stock_decode(arr)):
-                return True
+        # v26.13: Pass 2 (rotations) DISABLED. WeChat is already rotation-
+        # tolerant on straight-on cards, and Kim/Philip always shoot the
+        # divider card head-on. Running 6 extra decodes per non-divider
+        # photo cost ~2 min of wall time on a 343-photo sale for near-zero
+        # accuracy gain. Flip _ROTATION_PASS = True to restore.
+        _ROTATION_PASS = False
+        if _ROTATION_PASS:
+            for arr in _rotate_variants(gray1):
+                if _hits_divider(_wechat_decode(arr)):
+                    return True
+                if _hits_divider(_stock_decode(arr)):
+                    return True
 
         # v26.10.2: Passes 3, 4 DISABLED. Kim shoots the divider card
         # up close in every frame — the card is huge and clear at 1024,
@@ -2866,7 +2871,7 @@ async def jnj_diag():
         "recent_openai_failures": _openai_failure_count_recent(),
         "failure_threshold": _OPENAI_FAILURE_THRESHOLD,
         "python_version": _sys.version.split()[0],
-        "build_id": "2026-09-20-v26.10.2-only-passes-1-2",
+        "build_id": "2026-09-21-v26.13-pass-1-only",
     })
 
 
