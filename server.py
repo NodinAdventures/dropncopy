@@ -199,10 +199,16 @@ def detect_divider_qr(raw_bytes: bytes) -> bool:
             work1.thumbnail((1024, 1024))
             gray1 = np.array(work1.convert("L"))
             work1.close()
-            work2 = rgb.copy()
-            work2.thumbnail((1600, 1600))
-            gray2 = np.array(work2.convert("L"))
-            work2.close()
+            # v26.10.2: gray2 only needed if wide-frame or extra passes
+            # are enabled. Skipping the 1600px resize on every photo saves
+            # significant CPU. Kept behind the same gates so re-enabling
+            # is a one-flag flip.
+            gray2 = None
+            if False:  # _WIDE_FRAME_PASSES or _EXTRA_PASSES or _PASS_8_ENABLED
+                work2 = rgb.copy()
+                work2.thumbnail((1600, 1600))
+                gray2 = np.array(work2.convert("L"))
+                work2.close()
             rgb.close()
 
         # Pass 1: fast path — WeChat + stock on 1024 grayscale.
@@ -218,18 +224,23 @@ def detect_divider_qr(raw_bytes: bytes) -> bool:
             if _hits_divider(_stock_decode(arr)):
                 return True
 
-        # Pass 3: full-res 1600. Catches divider photos where the card
-        # was small in the frame.
-        for decode in (_wechat_decode, _stock_decode):
-            if _hits_divider(decode(gray2)):
-                return True
-
-        # Pass 4: 70% center crop. Isolates the QR when the background
-        # has extra text/logos that confused earlier passes.
-        cropped = _center_crop(gray2, 0.7)
-        for decode in (_wechat_decode, _stock_decode):
-            if _hits_divider(decode(cropped)):
-                return True
+        # v26.10.2: Passes 3, 4 DISABLED. Kim shoots the divider card
+        # up close in every frame — the card is huge and clear at 1024,
+        # so Pass 1 or Pass 2 catches every real divider. Full-res 1600
+        # and 70% crop only exist for edge cases where the card was tiny
+        # in a wide frame. Removing them drops per-photo work from ~9
+        # decodes to ~7 decodes AND avoids resizing every photo to 1600.
+        # On 378 photos, that saves ~5 min. Flip _WIDE_FRAME_PASSES = True
+        # to restore Passes 3-4.
+        _WIDE_FRAME_PASSES = False
+        if _WIDE_FRAME_PASSES:
+            for decode in (_wechat_decode, _stock_decode):
+                if _hits_divider(decode(gray2)):
+                    return True
+            cropped = _center_crop(gray2, 0.7)
+            for decode in (_wechat_decode, _stock_decode):
+                if _hits_divider(decode(cropped)):
+                    return True
 
         # v26.10: Pass 5, 6, 7 DISABLED. Ashley's call: restore the fast
         # path (Passes 1-4 only) that ran under 2 min in v25.x/v26.6.
@@ -2855,7 +2866,7 @@ async def jnj_diag():
         "recent_openai_failures": _openai_failure_count_recent(),
         "failure_threshold": _OPENAI_FAILURE_THRESHOLD,
         "python_version": _sys.version.split()[0],
-        "build_id": "2026-09-19-autorestart-unjam-lb-v25.77",
+        "build_id": "2026-09-20-v26.10.2-only-passes-1-2",
     })
 
 
