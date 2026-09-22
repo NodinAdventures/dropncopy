@@ -1226,16 +1226,47 @@ async def _fact_check_transcript(image_bytes: bytes, media_type: str, transcript
         "  3. Missing or wrong words in descriptions — only if you can "
         "CLEARLY read what the seller wrote\n"
         "  4. Rows that got merged when they should be separate, or split when "
-        "they should be one row\n\n"
+        "they should be one row\n"
+        "  5. FABRICATED WRAP-LINE ITEMS — see next section\n\n"
+        "=== FABRICATED WRAP-LINE ITEMS (COMMON MISTAKE TO FIX) ===\n"
+        "The first pass sometimes invents an item number for a wrap line.\n"
+        "Look at each row in the transcript and check the sheet: is there "
+        "REALLY a handwritten item number in the far-left column for that "
+        "row on the sheet, or was that row's description written on a line "
+        "where the left column was BLANK?\n\n"
+        "How to spot a fabricated wrap-line item:\n"
+        "  - The description sounds like a continuation of the row above "
+        "(short fragment, starts mid-thought, or continues the same topic "
+        "as the previous item).\n"
+        "  - On the sheet image, the far-left column is BLANK on that line "
+        "(no handwritten item # in that cell).\n"
+        "  - The item # in the transcript is sequential (like +1 from the "
+        "row above) but that number is NOT actually written on the sheet.\n\n"
+        "When you spot a fabricated wrap-line item:\n"
+        "  - DROP that row from the output entirely, AND\n"
+        "  - APPEND its description to the previous real row's description, "
+        "joined by a single space.\n\n"
+        "Example fix:\n"
+        "  First pass had:\n"
+        "    3103 93 COIN LOT 2 DOLLAR BILLS 2005 MINT SET 2001 MINT SET\n"
+        "    3104 93 1934 NICKEL 1986 NICKEL TWO CENT 1945 STEEL CENT AND MORE\n"
+        "  But the sheet shows 3104 is a real row with '1964 half dollars 40% one is graded AU55' "
+        "and the '1934 nickel...' text is on a line with a BLANK left column between 3103 and 3104.\n"
+        "  Corrected:\n"
+        "    3103 93 COIN LOT 2 DOLLAR BILLS 2005 MINT SET 2001 MINT SET 1934 NICKEL 1986 NICKEL TWO CENT 1945 STEEL CENT AND MORE\n"
+        "    3104 93 TWO 1964 HALF DOLLARS 40% ONE IS GRADED AU55\n\n"
+        "BUT: only fix this if you are 100% certain the left column on that "
+        "line is blank on the sheet. If you can see a handwritten item # "
+        "there, leave it alone — it's a real row.\n\n"
         "CROSSED-OUT DESCRIPTIONS — KEEP THE ROW:\n"
         "If a row's DESCRIPTION has been scribbled/crossed out but the item "
         "number and lot code are still readable, KEEP THE ROW with the item "
         "number and lot code intact, and leave the description blank (empty "
         "string). Do NOT drop rows with scribbles. Do NOT emit placeholders "
         "like 'ILLEGIBLE' or 'CROSSED OUT'. Just: ITEM_NUMBER LOT_CODE (nothing after).\n\n"
-        "The ONLY time to drop a row entirely: when the ITEM NUMBER itself "
-        "is scribbled out AND the lot code is scribbled out too (the seller "
-        "voided the whole row before writing anything meaningful). Even then, "
+        "The ONLY time to drop a row entirely (aside from fabricated wrap-line items above): "
+        "when the ITEM NUMBER itself is scribbled out AND the lot code is scribbled out too "
+        "(the seller voided the whole row before writing anything meaningful). Even then, "
         "if you can read the item number clearly, keep the row.\n\n"
         "Rules for your corrected output:\n"
         "  - EXACT same format as the input: one row per line, ITEM_NUMBER "
@@ -1994,19 +2025,37 @@ def build_jnj_csv_row(item_num: str, lot_code: str, description: str,
     row["Category"] = sale_name
     row["Title"] = title
 
-    # cf_SellerID (v25.23 + v25.32): ALWAYS "AA" + number, no exceptions.
-    # Number comes from (in order): boxed per-item seller num, sheet-level
-    # seller_id if it has digits, then the fallback counter. Letters stripped.
-    per_item_seller = (per_item_seller or "").strip()
-    per_item_digits = "".join(c for c in per_item_seller if c.isdigit())
-    seller_id_digits = "".join(c for c in (seller_id or "") if c.isdigit())
-    if per_item_digits:
-        seller_number = per_item_digits
-    elif seller_id_digits:
-        seller_number = seller_id_digits
+    # cf_SellerID: seller ID as read from the boxed number at the top of
+    # the sheet. Historical default was to strip letters and always prefix
+    # "AA" (v25.23 / v25.32). v26.17.7: sellers can have letter-prefix IDs
+    # (like K12, G45, B7, or full AA1234). New rule:
+    #   - If the seller ID as read starts with a letter, USE IT AS-IS —
+    #     the seller already provided their prefix, don't double-stamp "AA".
+    #   - If the seller ID is digits only, keep the historical "AA" prefix
+    #     so existing JnJ-side records stay consistent.
+    #   - If nothing is available, fall back to "AA" + a counter.
+    per_item_seller = (per_item_seller or "").strip().upper()
+    seller_id_up = (seller_id or "").strip().upper()
+
+    def _looks_like_full_seller_id(val: str) -> bool:
+        # Alphanumeric, starts with a letter, 1-6 chars total.
+        return bool(val) and val[:1].isalpha() and val.isalnum() and 1 <= len(val) <= 6
+
+    if _looks_like_full_seller_id(per_item_seller):
+        row["cf_SellerID"] = per_item_seller
+    elif _looks_like_full_seller_id(seller_id_up):
+        row["cf_SellerID"] = seller_id_up
     else:
-        seller_number = str(seller_seq)
-    row["cf_SellerID"] = f"AA{seller_number}"
+        # Digits-only path (or empty) — keep the AA prefix behavior.
+        per_item_digits = "".join(c for c in per_item_seller if c.isdigit())
+        seller_id_digits = "".join(c for c in seller_id_up if c.isdigit())
+        if per_item_digits:
+            seller_number = per_item_digits
+        elif seller_id_digits:
+            seller_number = seller_id_digits
+        else:
+            seller_number = str(seller_seq)
+        row["cf_SellerID"] = f"AA{seller_number}"
 
     # v25.51: cf_LotNumber / cf_Location were dropped — J&J's importer
     # expects EXACTLY 50 columns and crashed with 'Subscript out of range:
@@ -2374,14 +2423,17 @@ async def extract_seller_groups(image_bytes: bytes, media_type: str) -> List[Dic
 
 
 async def extract_seller_number(image_bytes: bytes, media_type: str) -> str:
-    """Find the hand-drawn BOXED seller number in the top header area of a
-    JnJ intake sheet. The seller draws a rectangle/square around 2-4 digits
-    (like 2860, 6009, 559) in the top ~20% of the page. That number is the
-    seller's staff ID and must appear on every item in the CSV so it shows
-    up on the JnJ website.
+    """Find the hand-drawn BOXED seller ID in the top header area of a
+    JnJ intake sheet. The seller draws a rectangle/square around a short
+    ID (like 2860, 6009, 559, or an alphanumeric like AA1234, G45, K12)
+    in the top ~20% of the page. That ID must appear on every item in the
+    CSV so it shows up on the JnJ website.
 
-    Returns the digits only (e.g. '2860'), or '' if none found. gpt-4o-mini
-    is plenty for this — ~250ms, ~$0.001.
+    v26.17.7: seller IDs CAN contain letters. Ashley clarified some sellers
+    have letter-prefix IDs like AA1234, K12, G45. We now accept 1-6 chars
+    of letters+digits, then uppercase everything.
+
+    Returns the ID (uppercase, e.g. '2860' or 'AA1234'), or '' if none found.
     """
     if not _OPENAI_KEY:
         return ""
@@ -2405,21 +2457,25 @@ async def extract_seller_number(image_bytes: bytes, media_type: str) -> str:
                         "This is a J&J Estate Auctioneers intake sheet. "
                         "At the TOP of the sheet, above or beside the \"SELLERS NAME\" line, "
                         "the office worker draws a rectangle or square in black pen/marker "
-                        "around the seller's number. The number is 1-5 digits.\n\n"
+                        "around the seller's ID. The ID is 1-6 characters and can be:\n"
+                        "  - Digits only, like 2860, 6009, 559, 1961\n"
+                        "  - Letters + digits, like AA1234, K12, G45, B7\n"
+                        "  - Rarely letters only, like AA or K\n\n"
                         "The box is ALWAYS hand-drawn (not a printed rectangle) and is in "
                         "the top portion of the sheet, near the sellers name / cart # line.\n\n"
-                        "Read the digits inside that hand-drawn box.\n\n"
-                        "CRITICAL: Read the ACTUAL number written on the sheet. Do NOT invent digits.\n"
-                        "CRITICAL: Do NOT copy any number from these instructions.\n"
-                        "CRITICAL: Every digit you output must be clearly visible inside a hand-drawn box.\n\n"
+                        "Read EXACTLY what's inside that hand-drawn box — digits and/or letters.\n\n"
+                        "CRITICAL: Read the ACTUAL characters written on the sheet. Do NOT invent characters.\n"
+                        "CRITICAL: Do NOT copy any number or letter from these instructions.\n"
+                        "CRITICAL: Every character you output must be clearly visible inside a hand-drawn box.\n\n"
                         "Rules:\n"
                         "- Ignore any printed boxes such as OFFICE USE ONLY, LOT DESCRIPTION, "
                         "or the LISTER box at the bottom.\n"
                         "- Ignore lot/item numbers in the grid rows.\n"
-                        "- Ignore CART # if it's just letters like \"Test\".\n"
-                        "- Preserve leading zeros exactly as written (if box shows 06, output 06 not 6).\n\n"
-                        "Reply with ONLY the digits, nothing else. If you truly cannot see "
-                        "a hand-drawn box with a number, reply with exactly: NONE"
+                        "- Ignore CART # if it says \"Test\" or something obviously not the seller ID.\n"
+                        "- Preserve leading zeros exactly as written (if box shows 06, output 06 not 6).\n"
+                        "- If the ID has letters, keep them (output AA1234, not 1234).\n\n"
+                        "Reply with ONLY the ID (digits and/or letters), nothing else. "
+                        "If you truly cannot see a hand-drawn box with an ID, reply with exactly: NONE"
                     )},
                     {"type": "image_url", "image_url": {
                         "url": f"data:{media_type};base64,{b64}",
@@ -2435,10 +2491,11 @@ async def extract_seller_number(image_bytes: bytes, media_type: str) -> str:
         # Sanity: reject if AI said NONE.
         if "NONE" in raw.upper():
             return ""
-        # Keep only digits, but preserve them in original order (leading zeros OK).
-        digits = re.sub(r"[^0-9]", "", raw)
-        if 1 <= len(digits) <= 5:
-            return digits
+        # v26.17.7: accept letters AND digits. Uppercase, strip anything that
+        # isn't A-Z or 0-9. Length cap 6 to catch runaway responses.
+        cleaned = re.sub(r"[^A-Za-z0-9]", "", raw).upper()
+        if 1 <= len(cleaned) <= 6:
+            return cleaned
         return ""
     except Exception as e:
         print(f"extract_seller_number failed: {type(e).__name__}: {e}", flush=True)
@@ -3022,7 +3079,7 @@ async def jnj_diag():
         "recent_openai_failures": _openai_failure_count_recent(),
         "failure_threshold": _OPENAI_FAILURE_THRESHOLD,
         "python_version": _sys.version.split()[0],
-        "build_id": "2026-09-21-v26.17.6-keep-rows-conservative",
+        "build_id": "2026-09-21-v26.17.8-wrap-line-fix",
     })
 
 
