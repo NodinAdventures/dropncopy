@@ -768,6 +768,31 @@ The wrong output invents item numbers for continuation lines and shifts every re
 
 **RULE OF THUMB FOR CURRENCY/COIN SHEETS:** If a description line is short (like just `LOW NUMBERED`, `YELLOW SEAL`, `GREAT QUALITY CLEAR`, `RARE DOUBLE DIAMOND 7 NUMBERED`) AND the far-left column is blank on that row, it is ALMOST CERTAINLY a wrap-line describing the item above. Merge it up. Never treat it as a stand-alone item.
 
+=== SMALL NUMBERS AT THE START OF A LINE ARE QUANTITIES, NOT ITEM NUMBERS ===
+Dave's item numbers on these sheets are ALWAYS 3 or 4 digits (like 3098, 3110, 7942) OR a letter prefix + digits (G6182, F1234). They fall in the sequential range of the sheet (e.g. 3098-3114 on one sheet).
+
+Any number smaller than 100 written at the START of a wrap line — like "3 REELS", "2 KNIVES", "5 PLATES", "12 BOOKS", "6 DOLLS", "4 CHAIRS" — is a QUANTITY that belongs to the description. It is NOT an item number and it is NOT the start of a new item.
+
+WRONG (treating "3 REELS" as a new item):
+  Sheet has:
+    3109  40C  Lot FISHING ITEMS NEW SPIN LINE REELS LEAD FOR WEIGHT
+              (blank) 3 REELS ARE OLD STOCK DIRECT DRIVE BY SHAKESPEARE
+    3110  42C  Lot H O TRAIN ITEMS PLUS NEW TRACK FOR SLOT CARS
+
+  Wrong output attaches the reels wrap to 3110:
+    3110 42C 3 REELS ARE OLD STOCK DIRECT DRIVE BY SHAKESPEARE H O TRAIN ITEMS PLUS NEW TRACK FOR SLOT CARS  <-- WRONG
+
+RIGHT ("3 REELS" wraps up into 3109, the fishing item, because reels are fishing gear):
+    3109 40C FISHING ITEMS NEW SPIN LINE REELS LEAD FOR WEIGHT 3 REELS ARE OLD STOCK DIRECT DRIVE BY SHAKESPEARE
+    3110 42C H O TRAIN ITEMS PLUS NEW TRACK FOR SLOT CARS
+
+=== WRAP LINES ATTACH TO THE ROW ABOVE, NOT THE ROW BELOW ===
+When a physical line on the sheet has a BLANK far-left column, that line is a continuation of the item DIRECTLY ABOVE it. Never attach it to the item below.
+
+Before you decide where a wrap line belongs, ask: "Does this wrap line's content match the item above or the item below?" A wrap line about REELS belongs with FISHING ITEMS. A wrap line about COINS belongs with a coin row. A wrap line about TRAINS belongs with a train row. The topic of the wrap should match the topic of the row above.
+
+If you're about to start a new item's description with content that reads like a continuation of the previous item (starts with a quantity + plural noun like "3 REELS", or mid-sentence like "AND MORE", "PLUS CARRIERS", "IN GOOD CONDITION"), STOP. That is a wrap line for the row above, not the start of the new item.
+
 === ORDER (CRITICAL) ===
 - Output the lines in the EXACT order they appear on the page, top to bottom.
 - Do NOT sort by item number. Do NOT rearrange. Do NOT alphabetize.
@@ -1665,6 +1690,62 @@ def _reconcile_item_numbers(transcript: str, verified_nums: List[str]) -> str:
     return "\n".join(new_lines)
 
 
+# v26.17.21: patterns that signal a description was actually the wrap-line
+# of the previous row, wrongly attached to this row. These fire ONLY if
+# they appear at the very start of a row's description text.
+_SUSPICIOUS_WRAP_STARTS = [
+    # "3 REELS", "12 BOOKS", "6 DOLLS" — quantity + plural noun. The digit
+    # part is 1-2 digits (real item numbers are 3+) followed by an ALL-CAPS
+    # word ending in S (plural).
+    re.compile(r"^\d{1,2}\s+[A-Z]{2,}S\b"),
+    # "AND MORE", "PLUS CARRIERS", "IN GOOD CONDITION", "WITH BOX" —
+    # mid-sentence connectors that never start a real item.
+    re.compile(r"^(AND|PLUS|WITH|IN|OR)\s+[A-Z]+"),
+]
+
+
+def _flag_suspicious_wrap_starts(transcript: str, warnings_out: list = None) -> None:
+    """Scan each transcript row for descriptions that start with a pattern
+    strongly suggesting the text is really a wrap-line for the row ABOVE.
+    Adds warnings for uncertain rows so the review screen highlights them.
+    Never modifies the transcript — pure flagging.
+    """
+    if warnings_out is None:
+        return
+    lines = [ln for ln in (transcript or "").split("\n") if ln.strip()]
+    for ln in lines:
+        parts = ln.strip().split(" ", 1)
+        if len(parts) < 2:
+            continue
+        item_num, rest = parts[0], parts[1].strip()
+        # Strip a leading lot-code token (short 1-4 char alnum) so we test
+        # the actual description, not the lot code. Lot codes like "42C",
+        # "O", "37B" — up to 4 chars, mixed alnum.
+        rest_tokens = rest.split(" ", 1)
+        if len(rest_tokens) >= 2 and 1 <= len(rest_tokens[0]) <= 4:
+            desc = rest_tokens[1].strip()
+        else:
+            desc = rest
+        for pat in _SUSPICIOUS_WRAP_STARTS:
+            if pat.match(desc):
+                # Don't double-flag if already flagged.
+                if any(w.get("item_num") == item_num for w in warnings_out):
+                    break
+                warnings_out.append({
+                    "item_num": item_num,
+                    "reason": (
+                        f"This row's description starts with '{desc[:30]}' — that reads like a "
+                        f"wrap-line from the row above. Check if this text should be moved "
+                        f"up to the previous row."
+                    ),
+                })
+                print(
+                    f"[flag-wrap] {item_num} desc starts with suspicious pattern: {desc[:40]!r}",
+                    flush=True,
+                )
+                break
+
+
 async def transcribe_image(image_bytes: bytes, media_type: str, warnings_out: list = None) -> str:
     b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
     data_url = f"data:{media_type};base64,{b64}"
@@ -1715,11 +1796,17 @@ async def transcribe_image(image_bytes: bytes, media_type: str, warnings_out: li
     # is no worse than a wrong first pass.
     try:
         double_checked = await _fact_check_transcript(image_bytes, media_type, enforced)
+        # v26.17.21: after fact-check, run a suspicious-wrap heuristic that
+        # flags rows whose description starts with a quantity + plural
+        # noun pattern (e.g. "3 REELS", "2 KNIVES"). Those are almost always
+        # wrap lines that got attached to the wrong parent row.
+        _flag_suspicious_wrap_starts(double_checked, warnings_out=warnings_out)
         return double_checked
     except Exception as e:
         # If the fact-checker fails for any reason, fall back to the
         # enforced first-pass output. Never break the pipeline over it.
         print(f"[fact-check] fell back to enforced first pass: {e}", flush=True)
+        _flag_suspicious_wrap_starts(enforced, warnings_out=warnings_out)
         return enforced
 
 
@@ -3625,7 +3712,7 @@ async def jnj_diag():
         "recent_openai_failures": _openai_failure_count_recent(),
         "failure_threshold": _OPENAI_FAILURE_THRESHOLD,
         "python_version": _sys.version.split()[0],
-        "build_id": "2026-09-22-v26.17.20-placeholder-rows",
+        "build_id": "2026-09-22-v26.17.21-wrap-direction",
     })
 
 
