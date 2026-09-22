@@ -774,6 +774,18 @@ The wrong output invents item numbers for continuation lines and shifts every re
 - If the item description is crossed out but you can still read the number, output: NUMBER ILLEGIBLE CROSSEDOUT
 - Never output just a bare item number with nothing after it — always put SOMETHING descriptive (even if it's just ILLEGIBLE).
 
+=== BLACKOUTS AND SCRIBBLES — WHAT COUNTS AS 'CROSSED OUT' ===
+A blackout only counts as crossing something out if it covers the SELLER'S OWN HANDWRITING. It does NOT count if it only covers PRINTED template text.
+
+Common non-crossouts to IGNORE (these are just the seller marking up the form template, NOT voiding a listing):
+- A black scribble covering the printed word 'Lot' at the start of the description column. This is EXTREMELY common on JnJ sheets and appears on nearly EVERY row of some sheets. It does NOT mean the row is crossed out.
+- Scribbles over printed grid lines, column headers, or 'Office Use Only' text.
+- Squiggles/lines drawn between the item # column and description column as a visual separator.
+
+When you see a blackout, ask: is it covering PRINTED template text (like the word 'Lot') or is it covering the SELLER'S HANDWRITING (their description words)? If it's covering only printed text, IGNORE the blackout entirely and read the row normally. The item and description are intact.
+
+Only treat a row as crossed out when the seller has scribbled through their OWN description handwriting — the words THEY wrote, not the printed form.
+
 === FINAL CHECK BEFORE OUTPUTTING EACH LINE ===
 - Every character on the line must be: A-Z, 0-9, or SPACE. Nothing else.
 - No tabs. No lowercase. No punctuation at all. No brackets. No dashes. No slashes. No dollar signs.
@@ -1280,16 +1292,38 @@ async def _fact_check_transcript(image_bytes: bytes, media_type: str, transcript
         "BUT: only fix this if you are 100% certain the left column on that "
         "line is blank on the sheet. If you can see a handwritten item # "
         "there, leave it alone — it's a real row.\n\n"
+        "BLACKOUTS AND SCRIBBLES — WHAT COUNTS AS 'CROSSED OUT':\n"
+        "IMPORTANT: A blackout only counts as 'crossed out' if it covers the "
+        "SELLER'S OWN HANDWRITING. It does NOT count if it only covers PRINTED "
+        "template text that was on the form before the seller wrote anything.\n\n"
+        "Common non-crossouts to IGNORE (these are just the seller marking "
+        "up the form, not voiding a listing):\n"
+        "  - A black scribble covering the printed word 'Lot' at the start of "
+        "a description column (the seller crossed out the template prefill so "
+        "they had room to write). This is EXTREMELY common on JnJ sheets and "
+        "appears on nearly EVERY row of some sheets.\n"
+        "  - Scribbles over printed grid lines, column headers, 'Office Use "
+        "Only', or the 'Please accurately describe your items' subtitle.\n"
+        "  - Scribbles connecting the item # column to the description column "
+        "as a visual separator (some sellers draw a squiggle to say 'this row "
+        "is complete').\n\n"
+        "KEEP THESE ROWS. They are real, active items. The seller's own "
+        "handwriting (item#, lot code, description words) is untouched.\n\n"
         "CROSSED-OUT DESCRIPTIONS — KEEP THE ROW:\n"
-        "If a row's DESCRIPTION has been scribbled/crossed out but the item "
-        "number and lot code are still readable, KEEP THE ROW with the item "
-        "number and lot code intact, and leave the description blank (empty "
-        "string). Do NOT drop rows with scribbles. Do NOT emit placeholders "
-        "like 'ILLEGIBLE' or 'CROSSED OUT'. Just: ITEM_NUMBER LOT_CODE (nothing after).\n\n"
-        "The ONLY time to drop a row entirely (aside from fabricated wrap-line items above): "
-        "when the ITEM NUMBER itself is scribbled out AND the lot code is scribbled out too "
-        "(the seller voided the whole row before writing anything meaningful). Even then, "
-        "if you can read the item number clearly, keep the row.\n\n"
+        "If a row's DESCRIPTION has been scribbled/crossed out (the SELLER'S "
+        "OWN description words are scribbled through, not just the printed "
+        "'Lot' template text) but the item number and lot code are still "
+        "readable, KEEP THE ROW with the item number and lot code intact, "
+        "and leave the description blank (empty string). Do NOT drop rows "
+        "with scribbles. Do NOT emit placeholders like 'ILLEGIBLE' or "
+        "'CROSSED OUT'. Just: ITEM_NUMBER LOT_CODE (nothing after).\n\n"
+        "The ONLY time to drop a row entirely (aside from fabricated "
+        "wrap-line items above): when the ITEM NUMBER itself is scribbled "
+        "out AND the lot code is scribbled out AND the description is "
+        "scribbled out — all three of the seller's own writings are "
+        "unreadable. Even then, if you can read the item number clearly, "
+        "keep the row. Blackouts over the printed 'Lot' template text do "
+        "NOT count as scribbling the description.\n\n"
         "Rules for your corrected output:\n"
         "  - EXACT same format as the input: one row per line, ITEM_NUMBER "
         "LOT_CODE DESCRIPTION separated by single spaces\n"
@@ -3101,7 +3135,7 @@ async def jnj_diag():
         "recent_openai_failures": _openai_failure_count_recent(),
         "failure_threshold": _OPENAI_FAILURE_THRESHOLD,
         "python_version": _sys.version.split()[0],
-        "build_id": "2026-09-21-v26.17.9-wrap-order",
+        "build_id": "2026-09-21-v26.17.10-blackout-printed-text",
     })
 
 
