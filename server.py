@@ -1110,10 +1110,28 @@ def _fix_first_row_duplicate(transcript: str) -> str:
 
 
 def _enforce_verified_item_numbers(transcript: str, verified_nums: List[str]) -> str:
-    """v26.17.14: Ashley's rule — item numbers on the sheet are ALWAYS in
-    sequence (each row = previous + 1). If a row's item # is NOT exactly
-    previous+1, it CAN'T be a real row — it must be a wrap line for the
-    row above.
+    """v26.17.15: Ashley's rule enforced against the ground-truth count.
+
+    Ground truth = verified_nums (from a dedicated 2x-zoom OCR pass of just
+    the item # column). If the sheet has N item numbers written and the AI
+    produced N+K transcript rows, exactly K rows are fake wrap-line rows.
+
+    Detection: for each transcript row, find the closest match in
+    verified_nums by position. The FIRST row anchors to verified_nums[0].
+    Then we walk both lists together. A transcript row whose item # does
+    NOT match the expected verified # (either off-by-one or repeated) is
+    a wrap line — append its text to the previous real row, drop it, and
+    do NOT advance the verified pointer.
+
+    This catches the case v26.17.14 missed: when the AI reuses the correct
+    NEXT number for a wrap line (labeling '1934 NICKEL...' as '3104' when
+    3104 is really 'TWO 1964 HALF DOLLARS'), shifting real descriptions
+    down by one. Result: transcript has one more row than verified. We
+    detect the shift by comparing row counts and content, and collapse
+    the extra row into the wrap position.
+
+    Falls back to the previous sequence-only check if verified_nums is
+    unavailable.
 
     Example (Gerald LaFever bug):
         3102 45C ...
@@ -1178,27 +1196,19 @@ def _enforce_verified_item_numbers(transcript: str, verified_nums: List[str]) ->
     if first_item_idx is None:
         return transcript
 
-    kept = []  # list of raw lines we are keeping
-    dropped_count = 0
-    expected = None  # next expected item # (previous + 1)
-
     def _extract_wrap_text(line: str) -> str:
         """Return everything after item# and optional lot code."""
         parts = line.strip().split(None, 2)
         if len(parts) < 2:
             return ""
         second = parts[1]
-        # If second token looks like a lot code (short alphanumeric, <=4 chars),
-        # description starts at parts[2].
         if len(second) <= 4 and re.match(r"^[A-Z0-9]+$", second):
             return parts[2].strip() if len(parts) >= 3 else ""
-        # Otherwise, second token is part of the description.
         return " ".join(parts[1:]).strip()
 
-    def _append_to_last_real_row(text: str) -> bool:
-        """Append text to the last kept line that has an item number. True if merged."""
+    def _append_to_last_real_row(kept: list, text: str) -> bool:
         if not text:
-            return True  # nothing to append but still consider it "handled"
+            return True
         for k in range(len(kept) - 1, -1, -1):
             prev = kept[k].strip()
             if not prev or prev.startswith("---"):
@@ -1208,45 +1218,117 @@ def _enforce_verified_item_numbers(transcript: str, verified_nums: List[str]) ->
                 return True
         return False
 
+    # ============================================================
+    # PRIMARY PATH: use verified_nums from the zoomed left-column reader
+    # as ground truth for how many rows the sheet has, and what item #
+    # each row should have.
+    # ============================================================
+    verified_ints = []
+    if verified_nums:
+        for v in verified_nums:
+            vd = _digits_only(v)
+            if len(vd) >= 3:
+                verified_ints.append(int(vd))
+
+    if verified_ints and len(verified_ints) >= 2:
+        # Walk transcript rows and verified list together.
+        # For each transcript row: if its item # matches verified_ints[v_idx],
+        # keep it and advance v_idx. Otherwise it's a fake wrap row — merge
+        # its text into the row above.
+        kept = []
+        dropped_count = 0
+        v_idx = 0
+        for (_, num, line) in parsed:
+            stripped = line.strip()
+            if not stripped:
+                kept.append(line)
+                continue
+            if stripped.startswith("---") and stripped.endswith("---"):
+                kept.append(line)
+                continue
+            if num is None:
+                kept.append(line)
+                continue
+            # We ran out of verified numbers — remaining rows are all fake wraps.
+            if v_idx >= len(verified_ints):
+                wrap = _extract_wrap_text(line)
+                if _append_to_last_real_row(kept, wrap):
+                    dropped_count += 1
+                    continue
+                kept.append(line)
+                continue
+            expected = verified_ints[v_idx]
+            if num == expected:
+                kept.append(line)
+                v_idx += 1
+            else:
+                # Item # doesn't match what SHOULD be on the sheet at this
+                # position. Could be off by one (wrap-line shift) or wrong
+                # entirely. Treat as fake wrap and merge into row above.
+                wrap = _extract_wrap_text(line)
+                if _append_to_last_real_row(kept, wrap):
+                    dropped_count += 1
+                    # Do NOT advance v_idx; expected is still the same.
+                else:
+                    # No previous row to merge into — keep as-is and advance.
+                    kept.append(line)
+                    v_idx += 1
+
+        # After walking, we may have MORE rows to reconcile: if v_idx <
+        # len(verified_ints), the transcript is missing rows the sheet has.
+        # That's a first-pass OCR miss — we can't invent descriptions, so log
+        # a warning and leave the transcript short.
+        if v_idx < len(verified_ints):
+            missing = verified_ints[v_idx:]
+            print(
+                f"[enforce-verified] transcript is MISSING {len(missing)} row(s) "
+                f"the sheet has: {missing}. First pass OCR gap.",
+                flush=True,
+            )
+
+        if dropped_count > 0:
+            print(
+                f"[enforce-verified] dropped {dropped_count} fake wrap row(s) "
+                f"to match sheet's actual row count. "
+                f"Verified: {verified_ints}",
+                flush=True,
+            )
+        return "\n".join(kept)
+
+    # ============================================================
+    # FALLBACK PATH: no verified_nums available. Fall back to the
+    # sequence-only rule (each row must be previous+1, else it's a wrap).
+    # ============================================================
+    kept = []
+    dropped_count = 0
+    expected = None
     for (_, num, line) in parsed:
         stripped = line.strip()
-        # Separators and blanks pass through, and reset the sequence anchor.
         if not stripped or (stripped.startswith("---") and stripped.endswith("---")):
             kept.append(line)
             expected = None
             continue
         if num is None:
-            # Non-item line — keep verbatim.
             kept.append(line)
             continue
         if expected is None:
-            # First real row after a separator/blank — anchor the sequence here.
             kept.append(line)
             expected = num + 1
             continue
         if num == expected:
-            # Perfect — in sequence.
             kept.append(line)
             expected = num + 1
             continue
-        # OUT OF SEQUENCE. This row is a wrap line for the row above.
-        # Merge its text into the previous real row and drop this row.
         wrap = _extract_wrap_text(line)
-        merged = _append_to_last_real_row(wrap)
-        if merged:
+        if _append_to_last_real_row(kept, wrap):
             dropped_count += 1
-            # DO NOT advance `expected` — we still want the next real row
-            # to be the same expected number.
         else:
-            # Couldn't find a previous row to append to — keep as-is (edge case).
             kept.append(line)
             expected = num + 1
 
     if dropped_count > 0:
         print(
-            f"[enforce-sequence] dropped {dropped_count} out-of-sequence row(s) "
-            f"(merged as wrap lines into row above). Anchor from left-col reader: "
-            f"{verified_nums[:5] if verified_nums else 'none'}",
+            f"[enforce-sequence-fallback] dropped {dropped_count} out-of-sequence row(s)",
             flush=True,
         )
     return "\n".join(kept)
@@ -3265,7 +3347,7 @@ async def jnj_diag():
         "recent_openai_failures": _openai_failure_count_recent(),
         "failure_threshold": _OPENAI_FAILURE_THRESHOLD,
         "python_version": _sys.version.split()[0],
-        "build_id": "2026-09-21-v26.17.14-sequence-enforced",
+        "build_id": "2026-09-21-v26.17.15-verified-count-enforced",
     })
 
 
