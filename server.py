@@ -854,6 +854,20 @@ When you see a blackout, ask: is it covering PRINTED template text (like the wor
 
 Only treat a row as crossed out when the seller has scribbled through their OWN description handwriting — the words THEY wrote, not the printed form.
 
+=== A SCRIBBLE TO THE RIGHT OF A DESCRIPTION IS NOT A CROSSOUT ===
+Sellers often draw a big black scribble AT THE END of a row (to the right of their description) to cover up an extra note, a scratch mark, an 'AS IS' stamp, or empty space they didn't want. This is NOT a crossout of the item. If the description handwriting itself is fully readable, the item is intact — output the description normally and IGNORE the trailing scribble.
+
+WRONG (appending CROSSEDOUT because of a trailing scribble):
+  Sheet row: "3129  40B  Lot of shower curtains ■■■■■■"
+  Wrong output: 3129 40B LOT OF SHOWER CURTAINS CROSSEDOUT  <-- WRONG
+
+RIGHT (the shower curtains description is fully readable; the trailing scribble is irrelevant):
+  3129 40B LOT OF SHOWER CURTAINS
+
+The word CROSSEDOUT is ONLY output when the ENTIRE row's description handwriting is scribbled out and unreadable. In that case output exactly: NUMBER ILLEGIBLE CROSSEDOUT (as a full-row replacement, not appended after a readable description).
+
+NEVER append the word CROSSEDOUT to the end of a normal, readable description. Either the whole row's handwriting is struck out (→ output the item # + ILLEGIBLE CROSSEDOUT) or the row is fine (→ output the description normally without any CROSSEDOUT tag).
+
 === FINAL CHECK BEFORE OUTPUTTING EACH LINE ===
 - Every character on the line must be: A-Z, 0-9, or SPACE. Nothing else.
 - No tabs. No lowercase. No punctuation at all. No brackets. No dashes. No slashes. No dollar signs.
@@ -1690,6 +1704,56 @@ def _reconcile_item_numbers(transcript: str, verified_nums: List[str]) -> str:
     return "\n".join(new_lines)
 
 
+# v26.17.22: strip a stray trailing "CROSSEDOUT" tag the AI sometimes
+# appends when it sees a scribble at the end of a row. The rule is:
+# either the WHOLE row is crossed out (→ output is "NUMBER ILLEGIBLE
+# CROSSEDOUT" as a full replacement) or the row is fine (no CROSSEDOUT
+# tag at all). A description like "LOT OF SHOWER CURTAINS CROSSEDOUT"
+# has readable content, so the trailing CROSSEDOUT is bogus — strip it.
+_TRAILING_CROSSEDOUT_RE = re.compile(r"\s+CROSSEDOUT\s*$", re.IGNORECASE)
+
+
+def _strip_trailing_crossedout(transcript: str) -> str:
+    """Remove a stray CROSSEDOUT suffix from any row whose description has
+    other real words in it. Leaves fully-illegible rows alone (those look
+    like 'NUMBER ILLEGIBLE CROSSEDOUT' with no other content).
+    """
+    if not transcript:
+        return transcript
+    out_lines = []
+    stripped_count = 0
+    for ln in transcript.split("\n"):
+        raw = ln.rstrip()
+        if not raw.strip():
+            out_lines.append(ln)
+            continue
+        # Only strip when the row has real description content beyond
+        # ILLEGIBLE / CROSSEDOUT. Split on spaces and see if there is at
+        # least one description word that isn't ILLEGIBLE or CROSSEDOUT.
+        tokens = raw.split()
+        # tokens[0] = item#, tokens[1] usually lot code or first desc word.
+        # Check if any token past position 1 is a real description word
+        # (not ILLEGIBLE, not CROSSEDOUT).
+        desc_tokens = tokens[1:] if len(tokens) > 1 else []
+        has_real_desc = any(
+            t.upper() not in ("ILLEGIBLE", "CROSSEDOUT")
+            for t in desc_tokens
+        )
+        if has_real_desc and _TRAILING_CROSSEDOUT_RE.search(raw):
+            new_ln = _TRAILING_CROSSEDOUT_RE.sub("", raw)
+            out_lines.append(new_ln)
+            stripped_count += 1
+        else:
+            out_lines.append(ln)
+    if stripped_count:
+        print(
+            f"[strip-crossedout] removed stray trailing CROSSEDOUT from "
+            f"{stripped_count} row(s) with real descriptions",
+            flush=True,
+        )
+    return "\n".join(out_lines)
+
+
 # v26.17.21: patterns that signal a description was actually the wrap-line
 # of the previous row, wrongly attached to this row. These fire ONLY if
 # they appear at the very start of a row's description text.
@@ -1796,6 +1860,10 @@ async def transcribe_image(image_bytes: bytes, media_type: str, warnings_out: li
     # is no worse than a wrong first pass.
     try:
         double_checked = await _fact_check_transcript(image_bytes, media_type, enforced)
+        # v26.17.22: strip stray trailing CROSSEDOUT tags before flagging
+        # and returning. The AI sometimes appends CROSSEDOUT when it sees
+        # a scribble at the end of a readable row — that suffix is bogus.
+        double_checked = _strip_trailing_crossedout(double_checked)
         # v26.17.21: after fact-check, run a suspicious-wrap heuristic that
         # flags rows whose description starts with a quantity + plural
         # noun pattern (e.g. "3 REELS", "2 KNIVES"). Those are almost always
@@ -1806,6 +1874,7 @@ async def transcribe_image(image_bytes: bytes, media_type: str, warnings_out: li
         # If the fact-checker fails for any reason, fall back to the
         # enforced first-pass output. Never break the pipeline over it.
         print(f"[fact-check] fell back to enforced first pass: {e}", flush=True)
+        enforced = _strip_trailing_crossedout(enforced)
         _flag_suspicious_wrap_starts(enforced, warnings_out=warnings_out)
         return enforced
 
@@ -3712,7 +3781,7 @@ async def jnj_diag():
         "recent_openai_failures": _openai_failure_count_recent(),
         "failure_threshold": _OPENAI_FAILURE_THRESHOLD,
         "python_version": _sys.version.split()[0],
-        "build_id": "2026-09-22-v26.17.21-wrap-direction",
+        "build_id": "2026-09-22-v26.17.22-strip-crossedout",
     })
 
 
