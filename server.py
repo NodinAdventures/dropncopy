@@ -1335,40 +1335,85 @@ def _enforce_verified_item_numbers(transcript: str, verified_nums: List[str]) ->
                     continue
                 kept.append(line)
                 continue
-            expected = verified_ints[v_idx]
-            if num == expected:
-                # LOOK AHEAD: if the NEXT item row also has this same #, the
-                # sheet only has one real row with this #, and one of the two
-                # in the transcript is a fake wrap-line. Since the wrap line
-                # sits ABOVE the real row on the sheet (that's how continuation
-                # works), the FIRST occurrence in the transcript is the fake
-                # — merge its text into the previous real row, drop it, and
-                # let the second occurrence take the real slot.
+            # ------------------------------------------------------------
+            # v26.17.18: 3-NUMBER WINDOW CHECK
+            # Instead of only checking the single expected verified #,
+            # look at a 3-wide window: previous, current, next.
+            #  • Match on PREVIOUS → duplicate of the row above → fake wrap.
+            #  • Match on CURRENT  → real row → keep and advance.
+            #  • Match on NEXT     → the AI skipped a row → the last kept row
+            #     was actually a fake wrap-line and stole this row's slot.
+            #     Fold the last kept row's tail text into its parent, drop
+            #     it, and re-anchor to this row at NEXT.
+            #  • Match on NONE     → the AI invented this number → fake wrap.
+            # ------------------------------------------------------------
+            prev_v = verified_ints[v_idx - 1] if v_idx > 0 else None
+            curr_v = verified_ints[v_idx]
+            next_v = verified_ints[v_idx + 1] if v_idx + 1 < len(verified_ints) else None
+
+            # CASE 1: matches CURRENT verified. Also check the look-ahead
+            # duplicate case (next transcript row has the same #).
+            if num == curr_v:
                 my_pos = item_row_by_orig_idx.get(orig_idx)
                 next_item_num = None
                 if my_pos is not None and my_pos + 1 < len(item_rows):
                     next_item_num = item_rows[my_pos + 1][1]
-                if next_item_num == expected:
+                if next_item_num == curr_v:
+                    # Duplicate ahead — THIS row is the fake wrap-line above
+                    # the real row.
                     wrap = _extract_wrap_text(line)
                     if _append_to_last_real_row(kept, wrap):
                         dropped_count += 1
-                        # Do NOT advance v_idx — the next row will match expected.
                         continue
-                # Normal case — keep it, advance the pointer.
                 kept.append(line)
                 v_idx += 1
-            else:
-                # Item # doesn't match what SHOULD be on the sheet at this
-                # position. Could be off by one (wrap-line shift) or wrong
-                # entirely. Treat as fake wrap and merge into row above.
+                continue
+
+            # CASE 2: matches PREVIOUS verified — duplicate of the row above.
+            if prev_v is not None and num == prev_v:
                 wrap = _extract_wrap_text(line)
                 if _append_to_last_real_row(kept, wrap):
                     dropped_count += 1
-                    # Do NOT advance v_idx; expected is still the same.
-                else:
-                    # No previous row to merge into — keep as-is and advance.
-                    kept.append(line)
-                    v_idx += 1
+                    continue
+
+            # CASE 3: matches NEXT verified — the last kept row was fake and
+            # stole this row's slot. Peel the tail off the last kept row,
+            # re-attach it as wrap text to the row before, and advance so
+            # THIS row takes the NEXT slot.
+            if next_v is not None and num == next_v:
+                # Find the last kept row that has an item # AND matches
+                # verified_ints[v_idx] (the slot we're skipping).
+                for k in range(len(kept) - 1, -1, -1):
+                    prev_line = kept[k].strip()
+                    if not prev_line or prev_line.startswith("---"):
+                        continue
+                    m2 = ITEM_NUMBER_RE.match(prev_line)
+                    if not m2:
+                        continue
+                    prev_num = int(_digits_only(m2.group(1)))
+                    if prev_num == curr_v:
+                        # This kept row occupies the slot we now know is fake.
+                        wrap = _extract_wrap_text(kept[k])
+                        # Remove the fake row from kept.
+                        del kept[k]
+                        # Merge its wrap text into whatever real row is above.
+                        _append_to_last_real_row(kept, wrap)
+                        dropped_count += 1
+                        break
+                    # Only inspect the most recent item row.
+                    break
+                # Now consume the NEXT verified slot with this row.
+                kept.append(line)
+                v_idx += 2  # skip the empty curr slot, land past next
+                continue
+
+            # CASE 4: matches NONE — the AI invented this number. Fake wrap.
+            wrap = _extract_wrap_text(line)
+            if _append_to_last_real_row(kept, wrap):
+                dropped_count += 1
+            else:
+                kept.append(line)
+                v_idx += 1
 
         # After walking, we may have MORE rows to reconcile: if v_idx <
         # len(verified_ints), the transcript is missing rows the sheet has.
@@ -3443,7 +3488,7 @@ async def jnj_diag():
         "recent_openai_failures": _openai_failure_count_recent(),
         "failure_threshold": _OPENAI_FAILURE_THRESHOLD,
         "python_version": _sys.version.split()[0],
-        "build_id": "2026-09-21-v26.17.17-three-anchor-check",
+        "build_id": "2026-09-21-v26.17.18-three-window-check",
     })
 
 
