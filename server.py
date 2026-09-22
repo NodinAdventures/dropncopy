@@ -597,6 +597,11 @@ If a row has NO lot number written (the office-use column is empty for that row)
 
 Read the handwriting VERY carefully. "Grill" and "Quilt" look similar in cursive — use context: "grill cover" makes more sense than "quilt cover" when paired with a mattress. Similarly "Faucet" makes more sense than "Facent".
 
+=== COMMON CURSIVE MISREADS TO WATCH FOR ===
+- "Sacagawea" (as in Sacagawea Dollar) is a real coin term. In cursive it can look like "Backgammon" or "Spaceaged" or "5 Backpacker" — but if the row is about coins or dollars, it is almost certainly "Sacagawea Dollar". Coin sellers write about Sacagawea dollars often. NEVER output BACKGAMMON, SPACEAGED, or BACKPACKER on a coin-related row — use SACAGAWEA.
+- "Buckles" (belt buckles) can look like "Bottles" in cursive. If the row lists "watches, knives, ___, and more cool stuff" the missing word is BUCKLES, not BOTTLES. Watches + knives + buckles is a classic collectibles group; watches + knives + bottles is not a typical grouping.
+- "WW2" or "WWII" (World War 2 / World War II) must be preserved as "WORLD WAR 2" or "WW2" — do NOT drop the number. If the seller wrote "WW2" or "World War 2", output "WORLD WAR 2" (with the 2). Books, models, and memorabilia about WW2 are common in these auctions and "World War" alone (without the 2) is a wrong reading that changes the meaning of the listing.
+
 === ONE ROW = ONE LISTING (CRITICAL) ===
 - Each row on the intake sheet is ONE auction listing, regardless of the quantity.
 - If a row says "2 MATTRESSES", output ONE line that says "2 MATTRESSES" — it is being sold as a set.
@@ -1279,13 +1284,26 @@ async def _fact_check_transcript(image_bytes: bytes, media_type: str, transcript
         "  Corrected (wrap text appended to 3103):\n"
         "    3103 93 COIN LOT 2 DOLLAR BILLS 2005 MINT SET 2001 MINT SET 1934 NICKEL 1908 NICKEL 1908 INDIAN CENT 1893 STEEL CENT AND MORE\n"
         "    3104 93 TWO 1964 HALF DOLLARS 40% ONE IS GRADED AU55\n\n"
-        "Example fix #2 (train items with reels wrap):\n"
-        "  First pass had:\n"
-        "    3110 42C 3 REELS ARE OLD STOCK DIRECT DRIVE BY SHAKESPEARE H O TRAIN ITEMS PLUS NEW TRACK FOR SLOT CARS\n"
-        "  Sheet shows: 3110's row is 'H.O. Train Items, Plus New Track For Slot Cars', "
-        "and the wrap line below it (blank left column) is '3-Reels Are Old Stock Direct-Drive By Shakespeare'.\n"
-        "  Corrected (main description FIRST, wrap text APPENDED at the end):\n"
-        "    3110 42C H O TRAIN ITEMS PLUS NEW TRACK FOR SLOT CARS 3 REELS ARE OLD STOCK DIRECT DRIVE BY SHAKESPEARE\n\n"
+        "Example fix #2 (fishing items with reels wrap):\n"
+        "  Sheet layout (top-to-bottom):\n"
+        "    3109 40C Fishing Items, New Ice Line, Reels, Lead For Weight\n"
+        "    [blank] [blank] Lot 3-Reels Are Old Stock Direct-Drive By Shakespeare  <-- wrap line\n"
+        "    3110 42C H.O. Train Items, Plus New Track For Slot Cars\n\n"
+        "  The wrap line '3 Reels Are Old Stock...' sits BETWEEN 3109 and 3110. "
+        "It belongs to the item # DIRECTLY ABOVE it on the sheet, which is 3109 "
+        "(fishing items) — NOT 3110 (train items) which is BELOW the wrap line.\n"
+        "  Corrected:\n"
+        "    3109 40C FISHING ITEMS NEW ICE LINE REELS LEAD FOR WEIGHT 3 REELS ARE OLD STOCK DIRECT DRIVE BY SHAKESPEARE\n"
+        "    3110 42C H O TRAIN ITEMS PLUS NEW TRACK FOR SLOT CARS\n\n"
+        "WRONG (do NOT do this):\n"
+        "    3109 40C FISHING ITEMS NEW ICE LINE REELS LEAD FOR WEIGHT\n"
+        "    3110 42C H O TRAIN ITEMS PLUS NEW TRACK FOR SLOT CARS 3 REELS ARE OLD STOCK DIRECT DRIVE BY SHAKESPEARE\n"
+        "       ^^^ WRONG: the 3-reels line belongs to 3109 fishing items, not 3110 train items. "
+        "Fishing items and reels are related; train items and reels are not. Also, the wrap line "
+        "sits ABOVE 3110 on the sheet, so it belongs to whatever item # is ABOVE the wrap, not below.\n\n"
+        "RULE: to find the parent of a wrap line, walk UP the sheet from the "
+        "wrap line until you hit the FIRST row with a real item number in the "
+        "far-left column. That upward-walk row is the parent. Never walk DOWN.\n\n"
         "NEVER put the wrap-line text before the main-row text. That reverses "
         "the meaning of the listing (makes it look like reels are the main "
         "item when the seller wrote train items as the main item).\n\n"
@@ -3135,7 +3153,7 @@ async def jnj_diag():
         "recent_openai_failures": _openai_failure_count_recent(),
         "failure_threshold": _OPENAI_FAILURE_THRESHOLD,
         "python_version": _sys.version.split()[0],
-        "build_id": "2026-09-21-v26.17.10-blackout-printed-text",
+        "build_id": "2026-09-21-v26.17.11-wrap-parent-and-ocr-hints",
     })
 
 
