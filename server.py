@@ -1250,6 +1250,61 @@ def _enforce_verified_item_numbers(transcript: str, verified_nums: List[str]) ->
         item_rows = [(idx, n, l) for (idx, n, l) in parsed if n is not None]
         # Build a lookup from parsed index -> position in item_rows
         item_row_by_orig_idx = {orig_idx: pos for pos, (orig_idx, _, _) in enumerate(item_rows)}
+
+        # ------------------------------------------------------------
+        # v26.17.17: STARTUP ANCHOR VALIDATION
+        # Check the first three transcript item rows against verified_ints
+        # to make sure we're starting from the right place. If the very first
+        # item row is wrong (fake wrap-line prepended), the whole walk is
+        # shifted and everything after it merges into the wrong parent.
+        #
+        # We check the first 3 transcript rows against the first 3 verified
+        # numbers. If they don't line up, we try skipping 1 transcript row
+        # (as a wrap-line into a synthetic "row zero") to see if that aligns.
+        # ------------------------------------------------------------
+        def _first_three_match(transcript_offset: int, verified_offset: int) -> bool:
+            """Do transcript item rows [offset..offset+2] equal verified[v_off..v_off+2]?"""
+            for k in range(3):
+                t_idx = transcript_offset + k
+                v_idx_local = verified_offset + k
+                if t_idx >= len(item_rows) or v_idx_local >= len(verified_ints):
+                    return t_idx >= len(item_rows) and v_idx_local >= len(verified_ints)
+                if item_rows[t_idx][1] != verified_ints[v_idx_local]:
+                    return False
+            return True
+
+        prepend_wrap_indices = set()  # transcript item-row positions to treat as wrap for row zero
+        if len(item_rows) >= 3 and len(verified_ints) >= 3:
+            if not _first_three_match(0, 0):
+                # Try skipping the first transcript row.
+                if _first_three_match(1, 0):
+                    prepend_wrap_indices.add(0)
+                    print(
+                        f"[enforce-verified] first row misaligned. Skipping transcript row 0 "
+                        f"(#{item_rows[0][1]}) as a leading wrap-line. "
+                        f"Verified starts at {verified_ints[0]}.",
+                        flush=True,
+                    )
+                elif _first_three_match(2, 0):
+                    prepend_wrap_indices.add(0)
+                    prepend_wrap_indices.add(1)
+                    print(
+                        f"[enforce-verified] first two rows misaligned. Skipping transcript rows "
+                        f"0-1 as leading wrap-lines. Verified starts at {verified_ints[0]}.",
+                        flush=True,
+                    )
+                else:
+                    # Can't find a clean 3-row alignment. Log and proceed — the
+                    # row-by-row walker below will still catch what it can.
+                    print(
+                        f"[enforce-verified] WARNING: first 3 transcript item rows "
+                        f"{[r[1] for r in item_rows[:3]]} don't match verified "
+                        f"{verified_ints[:3]}. Proceeding with best-effort walk.",
+                        flush=True,
+                    )
+
+        # Track which item-row positions to force-treat as fake wrap lines.
+        force_wrap_orig_idxs = {item_rows[p][0] for p in prepend_wrap_indices}
         for parsed_pos, (orig_idx, num, line) in enumerate(parsed):
             stripped = line.strip()
             if not stripped:
@@ -1260,6 +1315,17 @@ def _enforce_verified_item_numbers(transcript: str, verified_nums: List[str]) ->
                 continue
             if num is None:
                 kept.append(line)
+                continue
+            # FORCED WRAP (from startup anchor validation): treat this item row
+            # as a leading wrap-line and merge it into the row above (or drop
+            # if there is no row above).
+            if orig_idx in force_wrap_orig_idxs:
+                wrap = _extract_wrap_text(line)
+                if _append_to_last_real_row(kept, wrap):
+                    dropped_count += 1
+                    continue
+                # No previous row — nothing to merge into; drop silently.
+                dropped_count += 1
                 continue
             # We ran out of verified numbers — remaining rows are all fake wraps.
             if v_idx >= len(verified_ints):
@@ -3377,7 +3443,7 @@ async def jnj_diag():
         "recent_openai_failures": _openai_failure_count_recent(),
         "failure_threshold": _OPENAI_FAILURE_THRESHOLD,
         "python_version": _sys.version.split()[0],
-        "build_id": "2026-09-21-v26.17.16-wrap-above-real",
+        "build_id": "2026-09-21-v26.17.17-three-anchor-check",
     })
 
 
