@@ -1235,10 +1235,22 @@ def _enforce_verified_item_numbers(transcript: str, verified_nums: List[str]) ->
         # For each transcript row: if its item # matches verified_ints[v_idx],
         # keep it and advance v_idx. Otherwise it's a fake wrap row — merge
         # its text into the row above.
+        #
+        # SPECIAL CASE (v26.17.16 fix): if the AI produced a fake row with the
+        # SAME # as the expected NEXT real row, we would previously accept the
+        # fake as real and then reject the real row that follows. Detect this
+        # by looking ahead: if this row's # matches expected AND the very next
+        # row also matches expected (i.e. duplicate), then THIS row is the
+        # fake wrap-line (it appeared first because the wrap line is above the
+        # real row on the sheet). Merge THIS row's text into the row above and
+        # let the next row take the real slot.
         kept = []
         dropped_count = 0
         v_idx = 0
-        for (_, num, line) in parsed:
+        item_rows = [(idx, n, l) for (idx, n, l) in parsed if n is not None]
+        # Build a lookup from parsed index -> position in item_rows
+        item_row_by_orig_idx = {orig_idx: pos for pos, (orig_idx, _, _) in enumerate(item_rows)}
+        for parsed_pos, (orig_idx, num, line) in enumerate(parsed):
             stripped = line.strip()
             if not stripped:
                 kept.append(line)
@@ -1259,6 +1271,24 @@ def _enforce_verified_item_numbers(transcript: str, verified_nums: List[str]) ->
                 continue
             expected = verified_ints[v_idx]
             if num == expected:
+                # LOOK AHEAD: if the NEXT item row also has this same #, the
+                # sheet only has one real row with this #, and one of the two
+                # in the transcript is a fake wrap-line. Since the wrap line
+                # sits ABOVE the real row on the sheet (that's how continuation
+                # works), the FIRST occurrence in the transcript is the fake
+                # — merge its text into the previous real row, drop it, and
+                # let the second occurrence take the real slot.
+                my_pos = item_row_by_orig_idx.get(orig_idx)
+                next_item_num = None
+                if my_pos is not None and my_pos + 1 < len(item_rows):
+                    next_item_num = item_rows[my_pos + 1][1]
+                if next_item_num == expected:
+                    wrap = _extract_wrap_text(line)
+                    if _append_to_last_real_row(kept, wrap):
+                        dropped_count += 1
+                        # Do NOT advance v_idx — the next row will match expected.
+                        continue
+                # Normal case — keep it, advance the pointer.
                 kept.append(line)
                 v_idx += 1
             else:
@@ -3347,7 +3377,7 @@ async def jnj_diag():
         "recent_openai_failures": _openai_failure_count_recent(),
         "failure_threshold": _OPENAI_FAILURE_THRESHOLD,
         "python_version": _sys.version.split()[0],
-        "build_id": "2026-09-21-v26.17.15-verified-count-enforced",
+        "build_id": "2026-09-21-v26.17.16-wrap-above-real",
     })
 
 
