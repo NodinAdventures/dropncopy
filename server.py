@@ -494,6 +494,29 @@ Real people are using these listings to sell real items. A wrong lot code sends 
 
 OUTPUT FORMAT: ONE ITEM PER LINE. Each line is one full auction listing description. NO tabs. NO columns. NO title field.
 
+=== ONE OUTPUT ROW FOR EVERY SEPARATE ITEM ON THE SHEET (CRITICAL) ===
+Produce EXACTLY ONE OUTPUT ROW FOR EVERY SEPARATE ITEM THE SELLER WROTE. If the sheet has 4 separate items with 4 separate item numbers in the left column, output 4 rows. If the sheet has 12, output 12. Never combine two separate items into one output row.
+
+A row is "separate" whenever the OFFICE USE ONLY (far-left) column has its own item number. Even short one-line items like "LARGE LOT OF ROMAX" or "RAIN GEAR" get their own row. Even if two items look related (e.g. "HEATED BLANKET" then "RAIN GEAR") they are SEPARATE items and must be SEPARATE output rows.
+
+Do NOT summarize a page. Do NOT merge short items into a single "combo lot" row. Do NOT decide that a group of related items should be one listing. Every item # on the sheet becomes its own line in your output. Period.
+
+WRONG (merging 4 separate items into 1 row):
+  Sheet has:                                                          Wrong output:
+  ---------                                                            -------------
+  3098  37B  Lot LARGE LOT OF ROMAX                                   3098 37B LARGE LOT OF ROMAX PLUG IN HEATED BLANKET RAIN GEAR LARGE GROUP OF CONTAINERS  <-- WRONG, this is 4 items combined
+  3099  40B  Lot PLUG-IN HEATED BLANKET
+  3100  40B  Lot RAIN GEAR
+  3101  0    Lot LARGE GROUP OF CONTAINERS
+
+CORRECT (one output row per item #):
+  3098 37B LARGE LOT OF ROMAX
+  3099 40B PLUG IN HEATED BLANKET
+  3100 40B RAIN GEAR
+  3101 0 LARGE GROUP OF CONTAINERS
+
+The ONLY time a single output row contains multiple lines from the sheet is a WRAP LINE — when the seller's description ran onto the next physical line AND the OFFICE USE ONLY column on that next line is BLANK. If the far-left column has a number, it is ALWAYS a separate item, no matter how short the description.
+
 === WHAT EACH LINE LOOKS LIKE ===
 Every line starts with the item number EXACTLY as written on the sheet, a single space, then the full description in ALL CAPS.
 
@@ -1109,8 +1132,22 @@ def _fix_first_row_duplicate(transcript: str) -> str:
     return "\n".join(new_lines)
 
 
-def _enforce_verified_item_numbers(transcript: str, verified_nums: List[str]) -> str:
-    """v26.17.15: Ashley's rule enforced against the ground-truth count.
+def _enforce_verified_item_numbers(transcript: str, verified_nums: List[str], warnings_out: list = None) -> str:
+    """v26.17.19: Ashley's rule with flag-instead-of-drop.
+
+    Mutates `warnings_out` (if provided) with any uncertain-row flags.
+    Returns the (possibly auto-merged) transcript string. Backward-compatible
+    with callers that pass no warnings list.
+
+    Returns a tuple (transcript, warnings) where warnings is a list of
+    {"item_num": str, "reason": str} for rows the enforcer is uncertain
+    about. Auto-merges the HIGH-CONFIDENCE cases (duplicate # of the row
+    above, or duplicate ahead where the wrap is the first occurrence).
+    UNCERTAIN cases (# doesn't match the verified list at that position)
+    are KEPT AS-IS with a warning so Ashley can review and fix manually
+    with the existing merge/split/delete row tools. This preserves the
+    photo-matching sequence — the enforcer never removes a row it isn't
+    sure about.
 
     Ground truth = verified_nums (from a dedicated 2x-zoom OCR pass of just
     the item # column). If the sheet has N item numbers written and the AI
@@ -1158,6 +1195,7 @@ def _enforce_verified_item_numbers(transcript: str, verified_nums: List[str]) ->
     as an anchor to trust the starting number. The sequence rule itself
     is deterministic and does not require the AI.
     """
+    warnings = warnings_out if warnings_out is not None else []
     if not transcript.strip():
         return transcript
 
@@ -1407,25 +1445,80 @@ def _enforce_verified_item_numbers(transcript: str, verified_nums: List[str]) ->
                 v_idx += 2  # skip the empty curr slot, land past next
                 continue
 
-            # CASE 4: matches NONE — the AI invented this number. Fake wrap.
-            wrap = _extract_wrap_text(line)
-            if _append_to_last_real_row(kept, wrap):
-                dropped_count += 1
-            else:
-                kept.append(line)
-                v_idx += 1
+            # CASE 4: matches NONE — uncertain. Keep the row so we don't
+            # break the photo-matching sequence, but flag it for Ashley
+            # to review manually. Advance the verified pointer so we
+            # don't spam warnings on every downstream row.
+            kept.append(line)
+            warnings.append({
+                "item_num": str(num),
+                "reason": (
+                    f"# doesn't match sheet at this position "
+                    f"(sheet shows {prev_v}, {curr_v}, {next_v}) — please check"
+                ),
+            })
+            v_idx += 1
 
         # After walking, we may have MORE rows to reconcile: if v_idx <
         # len(verified_ints), the transcript is missing rows the sheet has.
-        # That's a first-pass OCR miss — we can't invent descriptions, so log
-        # a warning and leave the transcript short.
+        # That's a first-pass OCR miss (the AI merged multiple items into
+        # one row, or skipped a row entirely). Insert PLACEHOLDER rows for
+        # each missing # so Ashley sees a flagged, empty row in the review
+        # screen instead of them disappearing silently. Preserves the
+        # sheet's row count and the photo-matching sequence.
         if v_idx < len(verified_ints):
             missing = verified_ints[v_idx:]
             print(
                 f"[enforce-verified] transcript is MISSING {len(missing)} row(s) "
-                f"the sheet has: {missing}. First pass OCR gap.",
+                f"the sheet has: {missing}. Inserting flagged placeholders.",
                 flush=True,
             )
+            for miss in missing:
+                kept.append(f"{miss} [ADD DESCRIPTION HERE]")
+                warnings.append({
+                    "item_num": str(miss),
+                    "reason": "AI didn't type this item — the sheet has this lot # but nothing was written for it. Type the description.",
+                })
+
+        # ALSO: for any verified # that never made it into `kept` because
+        # earlier iterations moved past it without matching (e.g. AI
+        # produced a row whose # matched a LATER verified slot, skipping
+        # over earlier ones), backfill those too. Scan kept text to see
+        # which verified #s are represented.
+        kept_text_all = "\n".join(kept)
+        for vi, vint in enumerate(verified_ints):
+            v_str = str(vint)
+            # Look for the exact # at start of a line, or preceded by whitespace
+            found = False
+            for line in kept:
+                first_tok = line.strip().split(" ", 1)[0] if line.strip() else ""
+                if first_tok == v_str:
+                    found = True
+                    break
+            if not found:
+                # Already-flagged? Skip duplicate warning.
+                if any(w.get("item_num") == v_str for w in warnings):
+                    continue
+                # Insert in sequence order: find the right spot in `kept`
+                # by scanning existing item numbers.
+                insert_idx = len(kept)
+                for ki, kline in enumerate(kept):
+                    ktok = kline.strip().split(" ", 1)[0] if kline.strip() else ""
+                    try:
+                        if int(ktok) > vint:
+                            insert_idx = ki
+                            break
+                    except (ValueError, TypeError):
+                        continue
+                kept.insert(insert_idx, f"{v_str} [ADD DESCRIPTION HERE]")
+                warnings.append({
+                    "item_num": v_str,
+                    "reason": "AI didn't type this item — the sheet has this lot # but nothing was written for it. Type the description.",
+                })
+                print(
+                    f"[enforce-verified] backfilled missing # {v_str} at position {insert_idx}",
+                    flush=True,
+                )
 
         if dropped_count > 0:
             print(
@@ -1434,11 +1527,19 @@ def _enforce_verified_item_numbers(transcript: str, verified_nums: List[str]) ->
                 f"Verified: {verified_ints}",
                 flush=True,
             )
+        if warnings:
+            print(
+                f"[enforce-verified] flagged {len(warnings)} row(s) as uncertain: "
+                f"{[w['item_num'] for w in warnings]}",
+                flush=True,
+            )
         return "\n".join(kept)
 
     # ============================================================
     # FALLBACK PATH: no verified_nums available. Fall back to the
     # sequence-only rule (each row must be previous+1, else it's a wrap).
+    # High-confidence duplicates still auto-merge; anything else is
+    # kept as-is and flagged for Ashley to review.
     # ============================================================
     kept = []
     dropped_count = 0
@@ -1460,16 +1561,39 @@ def _enforce_verified_item_numbers(transcript: str, verified_nums: List[str]) ->
             kept.append(line)
             expected = num + 1
             continue
-        wrap = _extract_wrap_text(line)
-        if _append_to_last_real_row(kept, wrap):
-            dropped_count += 1
-        else:
-            kept.append(line)
-            expected = num + 1
+        # Out of sequence. Only auto-merge if this row's # is a duplicate
+        # of the row we just kept (very high confidence wrap). Otherwise
+        # keep the row and flag it.
+        prev_kept_num = None
+        for k in range(len(kept) - 1, -1, -1):
+            prev_stripped = kept[k].strip()
+            if not prev_stripped or prev_stripped.startswith("---"):
+                continue
+            m3 = ITEM_NUMBER_RE.match(prev_stripped)
+            if m3:
+                prev_kept_num = int(_digits_only(m3.group(1)))
+                break
+        if prev_kept_num is not None and num == prev_kept_num:
+            wrap = _extract_wrap_text(line)
+            if _append_to_last_real_row(kept, wrap):
+                dropped_count += 1
+                continue
+        # Uncertain — keep the row, flag it, resync expected pointer.
+        kept.append(line)
+        warnings.append({
+            "item_num": str(num),
+            "reason": f"# out of sequence (expected {expected}) — please check",
+        })
+        expected = num + 1
 
     if dropped_count > 0:
         print(
-            f"[enforce-sequence-fallback] dropped {dropped_count} out-of-sequence row(s)",
+            f"[enforce-sequence-fallback] auto-merged {dropped_count} duplicate row(s)",
+            flush=True,
+        )
+    if warnings:
+        print(
+            f"[enforce-sequence-fallback] flagged {len(warnings)} uncertain row(s)",
             flush=True,
         )
     return "\n".join(kept)
@@ -1541,7 +1665,7 @@ def _reconcile_item_numbers(transcript: str, verified_nums: List[str]) -> str:
     return "\n".join(new_lines)
 
 
-async def transcribe_image(image_bytes: bytes, media_type: str) -> str:
+async def transcribe_image(image_bytes: bytes, media_type: str, warnings_out: list = None) -> str:
     b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
     data_url = f"data:{media_type};base64,{b64}"
     # v25.68: run the main transcription and the left-column-only second pass
@@ -1584,7 +1708,7 @@ async def transcribe_image(image_bytes: bytes, media_type: str) -> str:
     # the sheet (per the verified left-column reader) can't be real rows;
     # they must be wrap lines for the row above. This runs BEFORE the
     # fact-checker so the fact-checker sees clean, real rows only.
-    enforced = _enforce_verified_item_numbers(reconciled, verified_nums)
+    enforced = _enforce_verified_item_numbers(reconciled, verified_nums, warnings_out=warnings_out)
     # v26.17.4: fact-checker pass. AI compares its transcription against the
     # sheet image and auto-fixes obvious mismatches. Ashley OK'd silent
     # auto-fix because she edits at the end anyway; a wrong auto-fix here
@@ -3138,16 +3262,29 @@ async def jnj_build_sheet(sheet: UploadFile = File(...)):
 
         # --- Run transcription + seller-group extraction on EACH page in parallel ---
         async def _do_page(pb: bytes, mt: str) -> Dict[str, Any]:
-            transcript_task = transcribe_image(pb, mt)
+            # v26.17.19: collect enforcer warnings per page so the review
+            # screen can flag uncertain rows without dropping them.
+            page_warnings: list = []
+            transcript_task = transcribe_image(pb, mt, warnings_out=page_warnings)
             groups_task = extract_seller_groups(pb, mt)
             transcript, seller_groups = await asyncio.gather(transcript_task, groups_task)
             items = parse_items_from_transcript(transcript)
             first_seller = seller_groups[0]["seller_num"] if seller_groups else ""
+            # Attach warnings to matching items by item_num so the client
+            # can render a yellow marker directly on those rows.
+            warn_by_num = {}
+            for w in page_warnings:
+                warn_by_num.setdefault(str(w.get("item_num", "")), []).append(w.get("reason", ""))
+            for it in items:
+                lot = str(it.get("lot", ""))
+                if lot in warn_by_num:
+                    it["warning"] = "; ".join(warn_by_num[lot])
             return {
                 "transcript": transcript,
                 "items": items,
                 "seller_number": first_seller,
                 "seller_groups": seller_groups,
+                "warnings": page_warnings,
             }
 
         page_results = await asyncio.gather(*[_do_page(pb, mt) for pb, mt in page_units])
@@ -3488,7 +3625,7 @@ async def jnj_diag():
         "recent_openai_failures": _openai_failure_count_recent(),
         "failure_threshold": _OPENAI_FAILURE_THRESHOLD,
         "python_version": _sys.version.split()[0],
-        "build_id": "2026-09-21-v26.17.18-three-window-check",
+        "build_id": "2026-09-22-v26.17.20-placeholder-rows",
     })
 
 

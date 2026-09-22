@@ -1566,3 +1566,31 @@ body {
 }
 .jnj-photo-thumb:hover .jnj-photo-makemain { opacity: 1; }
 .jnj-photo-makemain:hover { background: rgba(15, 23, 42, 0.85); }
+
+/* v26.17.19: uncertain-row flag on the review screen. The enforcer never
+   drops rows; instead it flags rows where the item # doesn't match the
+   sheet at that position or is out of sequence. Ashley can review the
+   yellow-highlighted rows and fix them with the existing merge/split/edit
+   tools. */
+tr.jnj-warn {
+  background: #fef9c3 !important;
+  box-shadow: inset 4px 0 0 0 #eab308;
+}
+tr.jnj-warn td.idx { color: #713f12; font-weight: 600; }
+.jnj-warn-icon {
+  color: #b45309;
+  font-size: 15px;
+  margin-right: 2px;
+  cursor: help;
+}
+.jnj-warn-banner {
+  margin: 8px 16px 12px;
+  padding: 10px 12px;
+  background: #fef9c3;
+  border: 1px solid #eab308;
+  border-radius: 6px;
+  color: #713f12;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.jnj-warn-banner strong { color: #713f12; }

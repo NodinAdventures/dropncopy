@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-09-21-v26.17.18-three-window-check";
+const BUILD_ID = "2026-09-22-v26.17.20-placeholder-rows";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v26.17.18 boot. BUILD_ID:", "2026-09-21-v26.17.18-three-window-check");
+jnjLog("BOOT", "v26.17.20 boot. BUILD_ID:", "2026-09-22-v26.17.20-placeholder-rows");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -161,16 +161,29 @@ function openTextReviewModal(itemsIn) {
   return new Promise((resolve, reject) => {
     // Deep-copy the items so cancel truly restores originals. We only
     // mutate `working` inside the modal.
-    const working = itemsIn.map(it => ({
-      _row_key: it._row_key,
-      item_num: String(it.item_num || ""),         // LOT # — e.g. "5435"
-      lot_code: String(it.lot_code || ""),          // LOCATION — e.g. "116C"
-      description: String(it.description || it.Description || ""),
-      sheet_seller_num: it.sheet_seller_num || "",
-      sheet_index: it.sheet_index,
-      // pass through anything else so nothing gets lost
-      _original: it,
-    }));
+    const working = itemsIn.map(it => {
+      let desc = String(it.description || it.Description || "");
+      // v26.17.20: placeholder rows come back with description literally
+      // set to "[ADD DESCRIPTION HERE]" when the AI merged/skipped an
+      // item. Clear the text so the input renders empty (with a red-ish
+      // placeholder hint) instead of Ashley having to select-and-delete.
+      if (desc.trim().toUpperCase() === "[ADD DESCRIPTION HERE]") {
+        desc = "";
+      }
+      return {
+        _row_key: it._row_key,
+        item_num: String(it.item_num || ""),         // LOT # — e.g. "5435"
+        lot_code: String(it.lot_code || ""),          // LOCATION — e.g. "116C"
+        description: desc,
+        sheet_seller_num: it.sheet_seller_num || "",
+        sheet_index: it.sheet_index,
+        // v26.17.19: server-attached warning for rows the enforcer flagged
+        // as uncertain (e.g. # doesn't match sheet at this position).
+        warning: it.warning || "",
+        // pass through anything else so nothing gets lost
+        _original: it,
+      };
+    });
 
     // Counter used to mint _row_key values for rows Dave adds via Split.
     // Existing keys look like "row0", "row1"; new ones look like "rowNew1".
@@ -204,6 +217,7 @@ function openTextReviewModal(itemsIn) {
           <span class="jnj-review-hint-item" style="color:#0f766e;">✎ Misspelled words show a red underline in Description</span>
           <span class="jnj-review-count" data-role="count"></span>
         </div>
+        <div class="jnj-warn-banner" data-role="warn-banner" style="display:none;"></div>
         <div class="jnj-review-body">
           <table class="jnj-review-table">
             <thead>
@@ -265,10 +279,20 @@ function openTextReviewModal(itemsIn) {
         }
         const tr = document.createElement("tr");
         tr.dataset.rowKey = row._row_key;
+        // v26.17.19: highlight uncertain rows with a yellow left border
+        // and a small ⚠ indicator in the # cell.
+        if (row.warning) {
+          tr.classList.add("jnj-warn");
+          tr.title = row.warning;
+        }
         // Item # cell — editable, monospace, small.
         const numTd = document.createElement("td");
         numTd.className = "idx";
-        numTd.textContent = String(idx + 1);
+        if (row.warning) {
+          numTd.innerHTML = `<span class="jnj-warn-icon" title="${_escAttr(row.warning)}">⚠</span> ${String(idx + 1)}`;
+        } else {
+          numTd.textContent = String(idx + 1);
+        }
         tr.appendChild(numTd);
 
         const itemTd = document.createElement("td");
@@ -292,7 +316,10 @@ function openTextReviewModal(itemsIn) {
         // and Chrome actually engage the browser spell dictionary. Without
         // an explicit lang, some browsers skip spellchecking in overlays.
         const descTd = document.createElement("td");
-        descTd.innerHTML = `<textarea class="jnj-review-input desc" spellcheck="true" lang="en" autocorrect="on" autocapitalize="sentences" rows="1">${_escText(row.description)}</textarea>`;
+        // v26.17.20: on flagged rows with empty description (placeholder),
+        // show a red-ish placeholder hint so Ashley knows to type here.
+        const descPlaceholder = (row.warning && !row.description) ? "← type description from sheet" : "";
+        descTd.innerHTML = `<textarea class="jnj-review-input desc" spellcheck="true" lang="en" autocorrect="on" autocapitalize="sentences" rows="1" placeholder="${_escAttr(descPlaceholder)}">${_escText(row.description)}</textarea>`;
         tr.appendChild(descTd);
 
         // Tools cell — Merge ↑, Split ↲, Delete ×.
@@ -315,7 +342,15 @@ function openTextReviewModal(itemsIn) {
           ta.style.height = (ta.scrollHeight + 2) + "px";
         };
         const sellerInput = sellerTd.querySelector("input");
-        itemInput.addEventListener("input", () => { row.item_num = itemInput.value; });
+        itemInput.addEventListener("input", () => {
+          row.item_num = itemInput.value;
+          // v26.17.19: once Ashley edits the # on a flagged row, clear the
+          // warning and re-render so the yellow highlight disappears.
+          if (row.warning) {
+            row.warning = "";
+            renderRows();
+          }
+        });
         lotInput.addEventListener("input", () => { row.lot_code = lotInput.value; });
         sellerInput.addEventListener("input", () => { row.sheet_seller_num = sellerInput.value; });
         descInput.addEventListener("input", () => {
@@ -374,6 +409,19 @@ function openTextReviewModal(itemsIn) {
         autosize(descInput);
       });
       countEl.textContent = `${working.length} lot${working.length === 1 ? "" : "s"}`;
+      // v26.17.19: warn banner for rows the enforcer flagged as uncertain.
+      const warnBanner = overlay.querySelector('[data-role="warn-banner"]');
+      const warnRows = working.filter(r => r.warning);
+      if (warnRows.length > 0 && warnBanner) {
+        const nums = warnRows.map(r => r.item_num || "[blank]").join(", ");
+        warnBanner.innerHTML = `<strong>⚠ ${warnRows.length} row${warnRows.length === 1 ? "" : "s"} need your attention.</strong> ` +
+          `The sheet's lot numbers didn't match what the AI typed on: <strong>${_escText(nums)}</strong>. ` +
+          `Rows are highlighted in yellow below — hover the ⚠ for details. ` +
+          `Use the row tools (↑ merge, ↲ split, × delete) to fix.`;
+        warnBanner.style.display = "";
+      } else if (warnBanner) {
+        warnBanner.style.display = "none";
+      }
     }
     renderRows();
 
@@ -1612,7 +1660,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v26.17.18 · ${BUILD_ID}`;
+  badge.textContent = `v26.17.20 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
@@ -1677,9 +1725,9 @@ try {
       const b = Number(j.key_b_active_builds || 0);
       const lbOn = Boolean(j.load_balancer_enabled);
       if (lbOn) {
-        badge.textContent = `v26.17.18 · A:${a} B:${b}`;
+        badge.textContent = `v26.17.20 · A:${a} B:${b}`;
       } else {
-        badge.textContent = `v26.17.18 · A:${a} (single key)`;
+        badge.textContent = `v26.17.20 · A:${a} (single key)`;
       }
     } catch {}
   }
