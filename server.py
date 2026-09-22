@@ -697,6 +697,21 @@ DO NOT output continuation text on its own line. DO NOT drop continuation text. 
 
 COMMON MISTAKE TO AVOID: Do NOT think 'the previous row was 8544 so the next row must be 8545.' That is only true when the sheet actually shows 8545 written in the far-left column. If the far-left column is blank, the row is a continuation, not the next item.
 
+CRITICAL: continuation lines often start with the printed template word 'Lot' followed by a big number like a coin year. For example:
+  Sheet has:                                                          Wrong output (DO NOT DO THIS):
+  ---------                                                            ----------------------------
+  3103  93  COIN LOT 2 DOLLAR BILLS 2005 MINT SET 2001 MINT SET       3103 93 COIN LOT 2 DOLLAR BILLS 2005 MINT SET 2001 MINT SET
+  [blank] [blank] Lot 1934 NICKEL 1908 NICKEL 1908 INDIAN CENT ...    3104 93 1934 NICKEL 1908 NICKEL 1908 INDIAN CENT ...  <-- WRONG
+  3104  93  TWO 1964 HALF DOLLARS 40% ONE IS GRADED AU55              3105 93 TWO 1964 HALF DOLLARS 40% ONE IS GRADED AU55  <-- WRONG SHIFTED
+
+The wrap line starts with the printed 'Lot' template text plus a big year number (1934). The number 1934 is a COIN YEAR, NOT an item number. The item number column is BLANK on that line.
+
+CORRECT output for that pattern:
+  3103 93 COIN LOT 2 DOLLAR BILLS 2005 MINT SET 2001 MINT SET 1934 NICKEL 1908 NICKEL 1908 INDIAN CENT 1893 STEEL CENT AND MORE
+  3104 93 TWO 1964 HALF DOLLARS 40% ONE IS GRADED AU55
+
+Rule: if the far-left item # column is blank, DO NOT read any 4-digit number on that line as an item number, even if that number happens to look like it could fit the sequence. Coin years (1934, 1908, 1893, 1964) are part of the DESCRIPTION, not item numbers. The item number MUST come from the far-left OFFICE USE ONLY column.
+
 **COIN, CURRENCY, AND SMALL-ITEM SHEETS ARE ESPECIALLY PRONE TO THIS ERROR.**
 
 On coin / currency / stamp / jewelry sheets, the seller often runs several one-line items in a row (like `1927-S MORGAN`, `1891-O MORGAN`, `1885 MORGAN`) and then hits ONE longer item that wraps to a second line. The wrap line has NO item number in the far-left column — it is the same item as the row above.
@@ -1094,6 +1109,149 @@ def _fix_first_row_duplicate(transcript: str) -> str:
     return "\n".join(new_lines)
 
 
+def _enforce_verified_item_numbers(transcript: str, verified_nums: List[str]) -> str:
+    """v26.17.14: Ashley's rule — item numbers on the sheet are ALWAYS in
+    sequence (each row = previous + 1). If a row's item # is NOT exactly
+    previous+1, it CAN'T be a real row — it must be a wrap line for the
+    row above.
+
+    Example (Gerald LaFever bug):
+        3102 45C ...
+        3103 93  COIN LOT 2 DOLLAR BILLS 2005 MINT SET 2001 MINT SET
+        3104 93  1934 NICKEL 1908 NICKEL 1908 INDIAN CENT ...   <-- AI invented
+        3105 93  TWO 1964 HALF DOLLARS 40% ONE IS GRADED AU55
+
+    3104 SHOULD be +1 from 3103 = 3104. That row IS in sequence, so it
+    passes the check — but the DESCRIPTION under it is wrong (it's really
+    the wrap of 3103, and the real 3104 description got shoved down to 3105).
+
+    Correct handling: walk rows in order. First row anchors the sequence.
+    Then every following row must be previous+1. If it is, it's real.
+    If it's NOT (skipped ahead by 2+, or repeated, or went backward),
+    that row is a wrap line — append its text to the row above and drop it.
+    After merging, keep expecting the same next # (don't advance the
+    expected counter).
+
+    Also handles the case where the AI reuses a valid number for a wrap
+    line and shifts everything down: if a row is 'expected+1' but the
+    row AFTER it repeats a number, we detect the extra row and merge it.
+
+    Note: verified_nums (from the zoomed left-column reader) is ONLY used
+    as an anchor to trust the starting number. The sequence rule itself
+    is deterministic and does not require the AI.
+    """
+    if not transcript.strip():
+        return transcript
+
+    def _digits_only(s: str) -> str:
+        return re.sub(r"[^0-9]", "", s or "")
+
+    lines = transcript.splitlines()
+
+    # First, collect every line's item # (or None for separators/blanks).
+    parsed = []  # list of (idx, item_num_int_or_None, raw_line)
+    for i, raw in enumerate(lines):
+        line = raw.rstrip()
+        stripped = line.strip()
+        if not stripped:
+            parsed.append((i, None, line))
+            continue
+        if stripped.startswith("---") and stripped.endswith("---"):
+            parsed.append((i, None, line))
+            continue
+        m = ITEM_NUMBER_RE.match(stripped)
+        if not m:
+            parsed.append((i, None, line))
+            continue
+        digits = _digits_only(m.group(1))
+        if len(digits) < 3:
+            parsed.append((i, None, line))
+            continue
+        parsed.append((i, int(digits), line))
+
+    # Find the first real item # to anchor the sequence.
+    first_item_idx = None
+    for j, (_, num, _) in enumerate(parsed):
+        if num is not None:
+            first_item_idx = j
+            break
+    if first_item_idx is None:
+        return transcript
+
+    kept = []  # list of raw lines we are keeping
+    dropped_count = 0
+    expected = None  # next expected item # (previous + 1)
+
+    def _extract_wrap_text(line: str) -> str:
+        """Return everything after item# and optional lot code."""
+        parts = line.strip().split(None, 2)
+        if len(parts) < 2:
+            return ""
+        second = parts[1]
+        # If second token looks like a lot code (short alphanumeric, <=4 chars),
+        # description starts at parts[2].
+        if len(second) <= 4 and re.match(r"^[A-Z0-9]+$", second):
+            return parts[2].strip() if len(parts) >= 3 else ""
+        # Otherwise, second token is part of the description.
+        return " ".join(parts[1:]).strip()
+
+    def _append_to_last_real_row(text: str) -> bool:
+        """Append text to the last kept line that has an item number. True if merged."""
+        if not text:
+            return True  # nothing to append but still consider it "handled"
+        for k in range(len(kept) - 1, -1, -1):
+            prev = kept[k].strip()
+            if not prev or prev.startswith("---"):
+                continue
+            if ITEM_NUMBER_RE.match(prev):
+                kept[k] = kept[k].rstrip() + " " + text
+                return True
+        return False
+
+    for (_, num, line) in parsed:
+        stripped = line.strip()
+        # Separators and blanks pass through, and reset the sequence anchor.
+        if not stripped or (stripped.startswith("---") and stripped.endswith("---")):
+            kept.append(line)
+            expected = None
+            continue
+        if num is None:
+            # Non-item line — keep verbatim.
+            kept.append(line)
+            continue
+        if expected is None:
+            # First real row after a separator/blank — anchor the sequence here.
+            kept.append(line)
+            expected = num + 1
+            continue
+        if num == expected:
+            # Perfect — in sequence.
+            kept.append(line)
+            expected = num + 1
+            continue
+        # OUT OF SEQUENCE. This row is a wrap line for the row above.
+        # Merge its text into the previous real row and drop this row.
+        wrap = _extract_wrap_text(line)
+        merged = _append_to_last_real_row(wrap)
+        if merged:
+            dropped_count += 1
+            # DO NOT advance `expected` — we still want the next real row
+            # to be the same expected number.
+        else:
+            # Couldn't find a previous row to append to — keep as-is (edge case).
+            kept.append(line)
+            expected = num + 1
+
+    if dropped_count > 0:
+        print(
+            f"[enforce-sequence] dropped {dropped_count} out-of-sequence row(s) "
+            f"(merged as wrap lines into row above). Anchor from left-col reader: "
+            f"{verified_nums[:5] if verified_nums else 'none'}",
+            flush=True,
+        )
+    return "\n".join(kept)
+
+
 def _reconcile_item_numbers(transcript: str, verified_nums: List[str]) -> str:
     """v25.68: if the second-pass left-column reader gave us a list of item
     numbers that clearly disagree with the main transcript, replace the
@@ -1199,18 +1357,23 @@ async def transcribe_image(image_bytes: bytes, media_type: str) -> str:
     # the reconcile logic sees a clean sequential run.
     fixed = _fix_first_row_duplicate(sanitized)
     reconciled = _reconcile_item_numbers(fixed, verified_nums)
+    # v26.17.13: Ashley's rule — rows whose item # isn't actually written on
+    # the sheet (per the verified left-column reader) can't be real rows;
+    # they must be wrap lines for the row above. This runs BEFORE the
+    # fact-checker so the fact-checker sees clean, real rows only.
+    enforced = _enforce_verified_item_numbers(reconciled, verified_nums)
     # v26.17.4: fact-checker pass. AI compares its transcription against the
     # sheet image and auto-fixes obvious mismatches. Ashley OK'd silent
     # auto-fix because she edits at the end anyway; a wrong auto-fix here
     # is no worse than a wrong first pass.
     try:
-        double_checked = await _fact_check_transcript(image_bytes, media_type, reconciled)
+        double_checked = await _fact_check_transcript(image_bytes, media_type, enforced)
         return double_checked
     except Exception as e:
         # If the fact-checker fails for any reason, fall back to the
-        # reconciled first-pass output. Never break the pipeline over it.
-        print(f"[fact-check] fell back to first pass: {e}", flush=True)
-        return reconciled
+        # enforced first-pass output. Never break the pipeline over it.
+        print(f"[fact-check] fell back to enforced first pass: {e}", flush=True)
+        return enforced
 
 
 async def _fact_check_transcript(image_bytes: bytes, media_type: str, transcript: str) -> str:
@@ -3102,7 +3265,7 @@ async def jnj_diag():
         "recent_openai_failures": _openai_failure_count_recent(),
         "failure_threshold": _OPENAI_FAILURE_THRESHOLD,
         "python_version": _sys.version.split()[0],
-        "build_id": "2026-09-21-v26.17.12-factcheck-words-numbers-only",
+        "build_id": "2026-09-21-v26.17.14-sequence-enforced",
     })
 
 
