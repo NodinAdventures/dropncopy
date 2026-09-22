@@ -1229,132 +1229,53 @@ async def _fact_check_transcript(image_bytes: bytes, media_type: str, transcript
     data_url = f"data:{media_type};base64,{b64}"
     check_prompt = (
         "You just transcribed this intake sheet. Below is what you wrote. "
-        "Compare it to the sheet image ROW BY ROW.\n\n"
-        "BE EXTREMELY CONSERVATIVE. Only change something if you are 100% "
-        "certain the first pass got it wrong AND you can clearly read the "
-        "correct value on the sheet. If there is ANY doubt — even 1% — "
-        "leave the row exactly as-is. A 'close match' or 'probably wrong' "
-        "is NOT a reason to change anything. Only fix confident, obvious "
-        "errors. When in doubt, keep the first pass.\n\n"
-        "What you MAY fix (only if 100% certain):\n"
-        "  1. Wrong item numbers (compare far-left column)\n"
-        "  2. Wrong lot / location codes (short 1-4 char code in column 2; "
-        "a lot code is NEVER 5+ chars — those extra digits belong to the description)\n"
-        "  3. Missing or wrong words in descriptions — only if you can "
-        "CLEARLY read what the seller wrote\n"
-        "  4. Rows that got merged when they should be separate, or split when "
-        "they should be one row\n"
-        "  5. FABRICATED WRAP-LINE ITEMS — see next section\n\n"
-        "=== FABRICATED WRAP-LINE ITEMS (COMMON MISTAKE TO FIX) ===\n"
-        "The first pass sometimes invents an item number for a wrap line.\n"
-        "Look at each row in the transcript and check the sheet: is there "
-        "REALLY a handwritten item number in the far-left column for that "
-        "row on the sheet, or was that row's description written on a line "
-        "where the left column was BLANK?\n\n"
-        "How to spot a fabricated wrap-line item:\n"
-        "  - The description sounds like a continuation of the row above "
-        "(short fragment, starts mid-thought, or continues the same topic "
-        "as the previous item).\n"
-        "  - On the sheet image, the far-left column is BLANK on that line "
-        "(no handwritten item # in that cell).\n"
-        "  - The item # in the transcript is sequential (like +1 from the "
-        "row above) but that number is NOT actually written on the sheet.\n\n"
-        "When you spot a fabricated wrap-line item:\n"
-        "  - DROP that row from the output entirely, AND\n"
-        "  - APPEND its description to the END of the previous real row's "
-        "description, joined by a single space. The wrap-line text goes "
-        "AFTER the main description text, NEVER before.\n\n"
-        "=== ORDER MATTERS (DO NOT REVERSE) ===\n"
-        "A wrap line ALWAYS belongs to the row ABOVE it on the sheet, "
-        "and its text ALWAYS comes AFTER the main row's text in the "
-        "output. The sheet reads top-to-bottom: the item # written on "
-        "line N owns any blank-left-column continuation lines below it "
-        "(line N+1, N+2, ...) UNTIL the next real item # appears.\n\n"
-        "When merging: take the previous row's existing description "
-        "AS-IS, then add a space, then add the wrap-line text at the end. "
-        "Do NOT put the wrap-line text first. Do NOT rewrite the previous "
-        "row's text. Just append.\n\n"
-        "Example fix #1 (coin sheet):\n"
-        "  First pass had:\n"
-        "    3103 93 COIN LOT 2 DOLLAR BILLS 2005 MINT SET 2001 MINT SET\n"
-        "    3104 93 1934 NICKEL 1908 NICKEL 1908 INDIAN CENT 1893 STEEL CENT AND MORE\n"
-        "  Sheet shows: 3103's row has 'coin lot 2 dollar bills 2005 mint set 2001 mint set', "
-        "the NEXT line has BLANK left column with '1934 nickel 1908 nickel 1908 indian cent 1893 steel cent and more', "
-        "and 3104 is a REAL row with 'two 1964 half dollars 40% one is graded AU55'.\n"
-        "  Corrected (wrap text appended to 3103):\n"
-        "    3103 93 COIN LOT 2 DOLLAR BILLS 2005 MINT SET 2001 MINT SET 1934 NICKEL 1908 NICKEL 1908 INDIAN CENT 1893 STEEL CENT AND MORE\n"
-        "    3104 93 TWO 1964 HALF DOLLARS 40% ONE IS GRADED AU55\n\n"
-        "Example fix #2 (fishing items with reels wrap):\n"
-        "  Sheet layout (top-to-bottom):\n"
-        "    3109 40C Fishing Items, New Ice Line, Reels, Lead For Weight\n"
-        "    [blank] [blank] Lot 3-Reels Are Old Stock Direct-Drive By Shakespeare  <-- wrap line\n"
-        "    3110 42C H.O. Train Items, Plus New Track For Slot Cars\n\n"
-        "  The wrap line '3 Reels Are Old Stock...' sits BETWEEN 3109 and 3110. "
-        "It belongs to the item # DIRECTLY ABOVE it on the sheet, which is 3109 "
-        "(fishing items) — NOT 3110 (train items) which is BELOW the wrap line.\n"
-        "  Corrected:\n"
-        "    3109 40C FISHING ITEMS NEW ICE LINE REELS LEAD FOR WEIGHT 3 REELS ARE OLD STOCK DIRECT DRIVE BY SHAKESPEARE\n"
-        "    3110 42C H O TRAIN ITEMS PLUS NEW TRACK FOR SLOT CARS\n\n"
-        "WRONG (do NOT do this):\n"
-        "    3109 40C FISHING ITEMS NEW ICE LINE REELS LEAD FOR WEIGHT\n"
-        "    3110 42C H O TRAIN ITEMS PLUS NEW TRACK FOR SLOT CARS 3 REELS ARE OLD STOCK DIRECT DRIVE BY SHAKESPEARE\n"
-        "       ^^^ WRONG: the 3-reels line belongs to 3109 fishing items, not 3110 train items. "
-        "Fishing items and reels are related; train items and reels are not. Also, the wrap line "
-        "sits ABOVE 3110 on the sheet, so it belongs to whatever item # is ABOVE the wrap, not below.\n\n"
-        "RULE: to find the parent of a wrap line, walk UP the sheet from the "
-        "wrap line until you hit the FIRST row with a real item number in the "
-        "far-left column. That upward-walk row is the parent. Never walk DOWN.\n\n"
-        "NEVER put the wrap-line text before the main-row text. That reverses "
-        "the meaning of the listing (makes it look like reels are the main "
-        "item when the seller wrote train items as the main item).\n\n"
-        "BUT: only fix this if you are 100% certain the left column on that "
-        "line is blank on the sheet. If you can see a handwritten item # "
-        "there, leave it alone — it's a real row.\n\n"
-        "BLACKOUTS AND SCRIBBLES — WHAT COUNTS AS 'CROSSED OUT':\n"
-        "IMPORTANT: A blackout only counts as 'crossed out' if it covers the "
-        "SELLER'S OWN HANDWRITING. It does NOT count if it only covers PRINTED "
-        "template text that was on the form before the seller wrote anything.\n\n"
-        "Common non-crossouts to IGNORE (these are just the seller marking "
-        "up the form, not voiding a listing):\n"
-        "  - A black scribble covering the printed word 'Lot' at the start of "
-        "a description column (the seller crossed out the template prefill so "
-        "they had room to write). This is EXTREMELY common on JnJ sheets and "
-        "appears on nearly EVERY row of some sheets.\n"
-        "  - Scribbles over printed grid lines, column headers, 'Office Use "
-        "Only', or the 'Please accurately describe your items' subtitle.\n"
-        "  - Scribbles connecting the item # column to the description column "
-        "as a visual separator (some sellers draw a squiggle to say 'this row "
-        "is complete').\n\n"
-        "KEEP THESE ROWS. They are real, active items. The seller's own "
-        "handwriting (item#, lot code, description words) is untouched.\n\n"
-        "CROSSED-OUT DESCRIPTIONS — KEEP THE ROW:\n"
-        "If a row's DESCRIPTION has been scribbled/crossed out (the SELLER'S "
-        "OWN description words are scribbled through, not just the printed "
-        "'Lot' template text) but the item number and lot code are still "
-        "readable, KEEP THE ROW with the item number and lot code intact, "
-        "and leave the description blank (empty string). Do NOT drop rows "
-        "with scribbles. Do NOT emit placeholders like 'ILLEGIBLE' or "
-        "'CROSSED OUT'. Just: ITEM_NUMBER LOT_CODE (nothing after).\n\n"
-        "The ONLY time to drop a row entirely (aside from fabricated "
-        "wrap-line items above): when the ITEM NUMBER itself is scribbled "
-        "out AND the lot code is scribbled out AND the description is "
-        "scribbled out — all three of the seller's own writings are "
-        "unreadable. Even then, if you can read the item number clearly, "
-        "keep the row. Blackouts over the printed 'Lot' template text do "
-        "NOT count as scribbling the description.\n\n"
-        "Rules for your corrected output:\n"
+        "Compare it to the sheet image ROW BY ROW and fix ONLY numbers and words "
+        "WITHIN the existing rows.\n\n"
+        "=== ABSOLUTE HARD LIMITS — NEVER VIOLATE ===\n"
+        "You MUST return EXACTLY the same number of rows as the first pass, in "
+        "EXACTLY the same order, with EXACTLY the same item numbers in the "
+        "far-left column.\n\n"
+        "YOU MUST NOT:\n"
+        "  - Delete any row (even if it looks like a wrap line or duplicate)\n"
+        "  - Add any row\n"
+        "  - Merge two rows into one\n"
+        "  - Split one row into two\n"
+        "  - Renumber any item number\n"
+        "  - Reorder any rows\n"
+        "  - Move text from one row to another row\n\n"
+        "If the first pass produced 9 rows, you MUST return 9 rows. If row 4 "
+        "in the input is item #3104, row 4 in your output MUST also be item "
+        "#3104. Row structure is FINAL. You are ONLY polishing text within "
+        "each row's own boundaries.\n\n"
+        "=== WHAT YOU MAY FIX (INSIDE A ROW ONLY) ===\n"
+        "For each row, you may fix these within that row only:\n"
+        "  1. NUMBERS — wrong digits in the description (e.g. '1961' should be "
+        "'1964' if the sheet clearly shows 1964, '90' should be '40%' if the "
+        "sheet clearly shows 40%). Only change a number if you are 100% certain "
+        "of the correct number by reading the sheet.\n"
+        "  2. WORDS — wrong or misspelled words in the description (e.g. "
+        "'BOTTLES' should be 'BUCKLES' if the sheet clearly shows buckles, "
+        "'BACKGAMMON' should be 'SACAGAWEA' if the sheet clearly shows Sacagawea). "
+        "Only change a word if you are 100% certain of the correct word by reading "
+        "the sheet.\n"
+        "  3. LOT CODE — short 1-4 char code in the lot column. Only change if "
+        "you are 100% certain the sheet shows a different value.\n\n"
+        "That is the entire list of allowed changes. If your correction would "
+        "require doing anything other than swapping numbers or words INSIDE a "
+        "single row's description or lot column, do not make the change.\n\n"
+        "=== BE EXTREMELY CONSERVATIVE ===\n"
+        "Only change a number, word, or lot code if you are 100% certain the "
+        "first pass got it wrong AND you can clearly read the correct value "
+        "on the sheet. If there is ANY doubt — even 1% — leave it alone.\n\n"
+        "=== OUTPUT FORMAT ===\n"
         "  - EXACT same format as the input: one row per line, ITEM_NUMBER "
         "LOT_CODE DESCRIPTION separated by single spaces\n"
+        "  - EXACT same row count and same item numbers in the same order\n"
         "  - ALL CAPS for descriptions\n"
-        "  - If a row's lot column is blank, omit the lot code entirely — do "
-        "NOT grab the first word of the description\n"
-        "  - If a row's description starts with a number+unit like '26 pcs', "
-        "'5 pc', '11 pcs', '3 ft', that number belongs to the DESCRIPTION, "
-        "not the lot code\n"
-        "  - Rows with a crossed-out description keep item# and lot code, description blank\n"
         "  - Output ONLY the corrected transcript. No commentary. No explanations. "
         "No markdown fences.\n\n"
-        "First-pass transcript to check:\n\n"
+        "First-pass transcript to check (return same number of rows, same item "
+        "numbers, only numbers/words polished):\n\n"
         f"{transcript}"
     )
     resp = await _openai_with_retry(
@@ -1389,17 +1310,45 @@ async def _fact_check_transcript(image_bytes: bytes, media_type: str, transcript
         # Drop the fence lines
         lines = [l for l in lines if not l.strip().startswith("```")]
         checked = "\n".join(lines).strip()
-    # Sanitize + safety: reject if the checked output has WAY fewer rows than
-    # the input. v26.17.5 relaxed this so the fact-checker can legitimately
-    # drop crossed-out rows; only reject if it drops MORE THAN HALF the rows
-    # (that would indicate the fact-checker went haywire, not just skipping
-    # a couple of scribbled-out entries).
+    # v26.17.12: HARD structural guard. Fact-check must NEVER change row count,
+    # add rows, delete rows, or renumber items. If the fact-checked transcript
+    # has a different row count OR different item numbers from the first pass,
+    # we discard the fact-check entirely and return the first pass. The
+    # fact-checker's only job is to fix numbers and words WITHIN existing rows.
     orig_lines = [l for l in transcript.splitlines() if l.strip()]
     checked_lines = [l for l in checked.splitlines() if l.strip()]
-    if len(orig_lines) >= 4 and len(checked_lines) < (len(orig_lines) // 2):
-        print(f"[fact-check] rejected — dropped too many rows ({len(orig_lines)} → {len(checked_lines)})", flush=True)
+
+    def _first_token(line: str) -> str:
+        parts = line.strip().split()
+        return parts[0] if parts else ""
+
+    orig_item_nums = [_first_token(l) for l in orig_lines]
+    checked_item_nums = [_first_token(l) for l in checked_lines]
+
+    if len(orig_lines) != len(checked_lines):
+        print(
+            f"[fact-check] REJECTED — row count changed "
+            f"({len(orig_lines)} → {len(checked_lines)}). Discarding fact-check, "
+            f"returning first pass unchanged.",
+            flush=True,
+        )
         return transcript
-    print(f"[fact-check] {len(orig_lines)} rows in → {len(checked_lines)} rows out", flush=True)
+
+    if orig_item_nums != checked_item_nums:
+        # Row count matches but item numbers were reordered or renumbered.
+        print(
+            f"[fact-check] REJECTED — item numbers changed. "
+            f"Orig: {orig_item_nums} vs Checked: {checked_item_nums}. "
+            f"Discarding fact-check, returning first pass unchanged.",
+            flush=True,
+        )
+        return transcript
+
+    print(
+        f"[fact-check] OK — {len(orig_lines)} rows, item numbers match. "
+        f"Only word/number polishing accepted.",
+        flush=True,
+    )
     return sanitize_transcript(checked)
 
 
@@ -3153,7 +3102,7 @@ async def jnj_diag():
         "recent_openai_failures": _openai_failure_count_recent(),
         "failure_threshold": _OPENAI_FAILURE_THRESHOLD,
         "python_version": _sys.version.split()[0],
-        "build_id": "2026-09-21-v26.17.11-wrap-parent-and-ocr-hints",
+        "build_id": "2026-09-21-v26.17.12-factcheck-words-numbers-only",
     })
 
 
