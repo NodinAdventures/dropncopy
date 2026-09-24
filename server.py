@@ -3781,7 +3781,7 @@ async def jnj_diag():
         "recent_openai_failures": _openai_failure_count_recent(),
         "failure_threshold": _OPENAI_FAILURE_THRESHOLD,
         "python_version": _sys.version.split()[0],
-        "build_id": "2026-09-22-v26.17.22-strip-crossedout",
+        "build_id": "2026-09-24-v26.17.24-no-screen-block",
     })
 
 

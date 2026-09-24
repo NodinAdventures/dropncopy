@@ -144,58 +144,6 @@ body {
   letter-spacing: 0.01em;
 }
 
-/* v26: small-screen block. Shown only when viewport width < 1024px.
-   Full-screen takeover, so the underlying app is not confusingly
-   half-visible behind it. */
-.small-screen-block {
-  position: fixed;
-  inset: 0;
-  z-index: 99999;
-  background: var(--bg, #171614);
-  color: var(--text, #cdccca);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 32px 24px;
-}
-.small-screen-inner {
-  max-width: 420px;
-  text-align: center;
-}
-.small-screen-icon {
-  width: 56px;
-  height: 56px;
-  margin: 0 auto 20px;
-  color: var(--accent, #4f98a3);
-  opacity: 0.85;
-}
-.small-screen-icon svg { width: 100%; height: 100%; }
-.small-screen-block h1 {
-  font-size: 22px;
-  font-weight: 600;
-  margin: 0 0 16px;
-  line-height: 1.3;
-}
-.small-screen-block p {
-  margin: 0 0 14px;
-  font-size: 15px;
-  line-height: 1.55;
-  color: var(--text-muted, #7a7974);
-}
-.small-screen-cta {
-  color: var(--text, #cdccca) !important;
-  font-weight: 500;
-}
-.small-screen-contact {
-  margin-top: 22px !important;
-  font-size: 13px !important;
-  opacity: 0.7;
-}
-.small-screen-contact a {
-  color: var(--accent, #4f98a3);
-  text-decoration: none;
-}
-
 /* ============ App shell ============ */
 .app {
   min-height: 100vh;

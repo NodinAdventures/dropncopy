@@ -10,7 +10,7 @@
 const PASSWORD = "LunchTime";
 // Deploy marker — bump when shipping a new build. Visible in the footer so
 // you can verify the browser is running the latest code without opening devtools.
-const BUILD_ID = "2026-09-22-v26.17.22-strip-crossedout";
+const BUILD_ID = "2026-09-24-v26.17.24-no-screen-block";
 
 // v24: capture EVERYTHING that happens during a build so we can see
 // silent failures. Wraps console.log/warn/error and fetch, and keeps
@@ -54,7 +54,7 @@ window.fetch = async (...args) => {
     throw err;
   }
 };
-jnjLog("BOOT", "v26.17.22 boot. BUILD_ID:", "2026-09-22-v26.17.22-strip-crossedout");
+jnjLog("BOOT", "v26.17.24 boot. BUILD_ID:", "2026-09-24-v26.17.24-no-screen-block");
 const STORAGE_KEY = "retype_entries_v1";
 const AUTH_KEY = "retype_authed_v1";
 
@@ -111,28 +111,9 @@ function saveCsvPrefs(prefs) {
   try { localStorage.setItem(CSV_PREFS_KEY, JSON.stringify(prefs)); } catch {}
 }
 
-/* -------------------- Small-screen block (v26) --------------------
-   Drop N Copy is a desktop/laptop tool. On phones or portrait tablets
-   the drag targets are unusable and the review tables can't show enough
-   rows to be worth anything. Rather than half-support mobile, we throw a
-   full-screen stop message under 1024px wide. That threshold keeps every
-   real laptop and iPad landscape in the clear; only phones and portrait
-   iPads see the block. Re-checks on window resize so a devtools-shrunk
-   window also gets the message. */
-const SMALL_SCREEN_MIN_WIDTH = 1024;
-function jnjCheckScreenSize() {
-  try {
-    const blocker = document.getElementById("smallScreenBlock");
-    if (!blocker) return;
-    if (window.innerWidth < SMALL_SCREEN_MIN_WIDTH) {
-      blocker.style.display = "flex";
-    } else {
-      blocker.style.display = "none";
-    }
-  } catch {}
-}
-jnjCheckScreenSize();
-window.addEventListener("resize", jnjCheckScreenSize);
+/* v26.17.24: small-screen block removed. Staff shrink the window to
+   copy and paste into their documents. The only notice left is the
+   small "Works best on a computer" line on the password page. */
 
 /* -------------------- Text Review Modal (v26 Step 1) --------------------
    After the AI transcribes the sheet(s) but BEFORE we spend time matching
@@ -1660,7 +1641,7 @@ try {
   const badge = document.createElement("div");
   badge.id = "buildIdBadge";
   badge.style.cssText = "position:fixed;bottom:8px;right:8px;z-index:9998;background:rgba(0,0,0,0.75);color:#7fff9f;padding:6px 10px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:0.02em;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
-  badge.textContent = `v26.17.22 · ${BUILD_ID}`;
+  badge.textContent = `v26.17.24 · ${BUILD_ID}`;
   // v24: clicking the badge opens the debug log overlay — same as the error
   // banner button, but lets the user check the log even when things went
   // "fine" (e.g. build ran but nothing happened afterward).
@@ -1725,9 +1706,9 @@ try {
       const b = Number(j.key_b_active_builds || 0);
       const lbOn = Boolean(j.load_balancer_enabled);
       if (lbOn) {
-        badge.textContent = `v26.17.22 · A:${a} B:${b}`;
+        badge.textContent = `v26.17.24 · A:${a} B:${b}`;
       } else {
-        badge.textContent = `v26.17.22 · A:${a} (single key)`;
+        badge.textContent = `v26.17.24 · A:${a} (single key)`;
       }
     } catch {}
   }
